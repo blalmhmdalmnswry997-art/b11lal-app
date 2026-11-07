@@ -1,0 +1,6 @@
+{
+  "name": "CipherMesh",
+  "description": "100% offline peer-to-peer encrypted mesh communication, media sharing, and P2P video calls via Nearby Connections.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

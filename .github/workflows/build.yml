@@ -19,10 +19,10 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Gradle 8.12
+      - name: Setup Gradle from Wrapper
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.12'
+          gradle-version: wrapper
 
       - name: Prepare Signing and Env Files
         run: |
@@ -34,11 +34,18 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-configuration-cache --stacktrace --no-daemon
-          else
-            gradle assembleDebug --no-configuration-cache --stacktrace --no-daemon
+          set -o pipefail
+          cat gradle/wrapper/gradle-wrapper.properties || true
+          if ! gradle assembleDebug --no-configuration-cache --no-daemon 2>&1 | tee build.log; then
+            REQ_VER=$(grep -oP 'Minimum supported Gradle version is \K[0-9.]+' build.log | head -n 1 || true)
+            if [ -n "$REQ_VER" ]; then
+              echo " Auto-installing required Gradle version: $REQ_VER"
+              curl -sL "https://services.gradle.org/distributions/gradle-${REQ_VER}-bin.zip" -o gradle.zip
+              unzip -q gradle.zip -d /tmp/gradle-dist
+              /tmp/gradle-dist/gradle-${REQ_VER}/bin/gradle assembleDebug --no-configuration-cache --no-daemon
+            else
+              exit 1
+            fi
           fi
 
       - name: Upload APK

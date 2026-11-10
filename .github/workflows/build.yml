@@ -19,12 +19,12 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Gradle 8.11.1
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: '9.1.0'
 
-      - name: Prepare Required Signing and Env Files
+      - name: Prepare Signing and Env Files
         run: |
           if [ ! -f .env.example ]; then touch .env.example; fi
           if [ ! -f .env ]; then cp .env.example .env; fi
@@ -34,9 +34,12 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          gradle wrapper --gradle-version 8.11.1 --no-configuration-cache
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-configuration-cache --stacktrace --no-daemon
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-configuration-cache --stacktrace --no-daemon
+          else
+            gradle assembleDebug --no-configuration-cache --stacktrace --no-daemon
+          fi
 
       - name: Upload APK
         if: success()

@@ -19,10 +19,10 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Setup Gradle 9.1
+      - name: Setup Gradle 8.12
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.1'
+          gradle-version: '8.12'
 
       - name: Prepare Signing and Env Files
         run: |

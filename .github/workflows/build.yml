@@ -13,16 +13,16 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Setup Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '9.1.0'
+          gradle-version: '8.10.2'
 
       - name: Prepare Signing and Env Files
         run: |
@@ -34,12 +34,9 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-configuration-cache --stacktrace --no-daemon
-          else
-            gradle assembleDebug --no-configuration-cache --stacktrace --no-daemon
-          fi
+          gradle wrapper --gradle-version 8.10.2 --no-configuration-cache
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-configuration-cache --stacktrace --no-daemon
 
       - name: Upload APK
         if: success()

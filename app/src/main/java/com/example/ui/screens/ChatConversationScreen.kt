@@ -7,17 +7,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -28,32 +18,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.filled.Hub
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -85,10 +52,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun ChatConversationScreen(
-    viewModel: MainViewModel,
-    modifier: Modifier = Modifier
-) {
+fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val selectedPeerId by viewModel.selectedPeerId.collectAsState()
     val connectedPeers by viewModel.connectedPeers.collectAsState()
@@ -107,14 +71,10 @@ fun ChatConversationScreen(
     val isBroadcast = selectedPeerId == "*" || selectedPeerId == null
     val isVerified = selectedPeerId != null && verifiedPeers.contains(selectedPeerId)
 
-    BackHandler {
-        viewModel.navigateTo(AppScreen.CHATS)
-    }
+    BackHandler { viewModel.navigateTo(AppScreen.CHATS) }
 
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
     }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
@@ -126,38 +86,19 @@ fun ChatConversationScreen(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Color(0xFF070D18))
-    ) {
-        // Conversation Top Bar
+    Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF0F1A2E))
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(
-                    onClick = { viewModel.navigateTo(AppScreen.CHATS) },
-                    modifier = Modifier.testTag("back_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White
-                    )
+                IconButton(onClick = { viewModel.navigateTo(AppScreen.CHATS) }, modifier = Modifier.testTag("back_button")) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                 }
-
-                Spacer(modifier = Modifier.width(4.dp))
-
+                Spacer(Modifier.width(4.dp))
                 Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
+                    modifier = Modifier.size(38.dp).clip(CircleShape)
                         .background(if (isBroadcast) AmberMesh.copy(alpha = 0.2f) else CyanPrimary.copy(alpha = 0.2f)),
                     contentAlignment = Alignment.Center
                 ) {
@@ -168,25 +109,13 @@ fun ChatConversationScreen(
                         modifier = Modifier.size(20.dp)
                     )
                 }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
+                Spacer(Modifier.width(10.dp))
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = peerDisplayName,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text(peerDisplayName, style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.Bold)
                         if (isVerified) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
-                                tint = EmeraldSecure,
-                                modifier = Modifier.size(14.dp)
-                            )
+                            Spacer(Modifier.width(4.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = "Verified", tint = EmeraldSecure, modifier = Modifier.size(14.dp))
                         }
                     }
                     Text(
@@ -199,55 +128,24 @@ fun ChatConversationScreen(
 
             if (!isBroadcast && selectedPeerId != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = {
-                            viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE)
-                        },
-                        modifier = Modifier.testTag("voice_call_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Voice Call",
-                            tint = CyanPrimary
-                        )
+                    IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE) }, modifier = Modifier.testTag("voice_call_button")) {
+                        Icon(Icons.Default.Call, contentDescription = "Voice Call", tint = CyanPrimary)
                     }
-
-                    IconButton(
-                        onClick = {
-                            viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VIDEO)
-                        },
-                        modifier = Modifier.testTag("video_call_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Videocam,
-                            contentDescription = "Video Call",
-                            tint = EmeraldSecure
-                        )
+                    IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VIDEO) }, modifier = Modifier.testTag("video_call_button")) {
+                        Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = EmeraldSecure)
                     }
-
                     currentPeer?.let { peer ->
-                        IconButton(
-                            onClick = { viewModel.openVerificationDialog(peer) },
-                            modifier = Modifier.testTag("verify_key_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Security,
-                                contentDescription = "Verify Key",
-                                tint = if (isVerified) EmeraldSecure else AmberMesh
-                            )
+                        IconButton(onClick = { viewModel.openVerificationDialog(peer) }, modifier = Modifier.testTag("verify_key_button")) {
+                            Icon(Icons.Default.Security, contentDescription = "Verify Key", tint = if (isVerified) EmeraldSecure else AmberMesh)
                         }
                     }
                 }
             }
         }
 
-        // Messages List anchored to bottom
         LazyColumn(
             state = listState,
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom)
         ) {
             items(messages) { message ->
@@ -259,7 +157,6 @@ fun ChatConversationScreen(
             }
         }
 
-        // Bottom Bar: Fixed directly at the bottom above the keyboard
         if (isRecordingVoice) {
             VoiceNoteRecordingBar(
                 durationSec = recordingDuration,
@@ -268,30 +165,177 @@ fun ChatConversationScreen(
             )
         } else {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF0F1A2E))
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(
-                    onClick = {
-                        mediaPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                        )
-                    },
+                    onClick = { mediaPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
                     modifier = Modifier.testTag("attach_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.AttachFile,
-                        contentDescription = "Attach Media",
-                        tint = CyanPrimary
-                    )
+                    Icon(Icons.Default.AttachFile, contentDescription = "Attach Media", tint = CyanPrimary)
                 }
 
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = {
-                        Text(
-                            text = "Encrypted
+                    placeholder = { Text("Encrypted message...", color = Color(0xFF536B8D), fontSize = 13.sp) },
+                    modifier = Modifier.weight(1f).testTag("message_input_field"),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = Color(0xFF070D18),
+                        unfocusedContainerColor = Color(0xFF070D18),
+                        focusedBorderColor = CyanPrimary,
+                        unfocusedBorderColor = Color(0xFF1B2F4E),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        if (inputText.isNotBlank()) {
+                            viewModel.sendTextMessage(inputText)
+                            inputText = ""
+                        }
+                    }),
+                    maxLines = 4
+                )
+
+                Spacer(Modifier.width(6.dp))
+
+                if (inputText.isNotBlank()) {
+                    IconButton(
+                        onClick = {
+                            viewModel.sendTextMessage(inputText)
+                            inputText = ""
+                        },
+                        modifier = Modifier.size(44.dp).clip(CircleShape).background(CyanPrimary).testTag("send_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color(0xFF001F29), modifier = Modifier.size(20.dp))
+                    }
+                } else {
+                    IconButton(
+                        onClick = { viewModel.startVoiceRecording() },
+                        modifier = Modifier.size(44.dp).clip(CircleShape).background(EmeraldSecure).testTag("voice_record_button")
+                    ) {
+                        Icon(Icons.Default.Mic, contentDescription = "Record Voice Note", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
+                    }
+                }
+            }
+        }
+    }
+
+    peerToVerify?.let { peer ->
+        SecurityVerificationDialog(
+            peer = peer,
+            isVerified = verifiedPeers.contains(peer.nodeId),
+            onVerifyClick = { viewModel.markPeerVerified(peer.nodeId) },
+            onDismiss = { viewModel.closeVerificationDialog() }
+        )
+    }
+}
+
+@Composable
+private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceNote: () -> Unit) {
+    val alignment = if (message.isOutgoing) Alignment.End else Alignment.Start
+    val bubbleColor = if (message.isOutgoing) Color(0xFF003644) else Color(0xFF132038)
+    val borderColor = if (message.isOutgoing) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1F355A)
+
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
+        if (message.hopCount > 0 || message.relayPath.isNotEmpty()) {
+            val hopText = if (message.relayPath.isNotEmpty()) "Relayed via: ${message.relayPath.joinToString(" -> ")}" else "Mesh Relayed (${message.hopCount} hops)"
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                Icon(Icons.Default.Hub, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(10.dp))
+                Spacer(Modifier.width(4.dp))
+                Text(hopText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = AmberMesh, fontWeight = FontWeight.Medium)
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = if (message.isOutgoing) 16.dp else 4.dp, bottomEnd = if (message.isOutgoing) 4.dp else 16.dp))
+                .background(bubbleColor)
+                .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+                .padding(12.dp)
+        ) {
+            Column {
+                if (!message.isOutgoing) {
+                    Text(message.senderName, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = CyanPrimary)
+                    Spacer(Modifier.height(2.dp))
+                }
+
+                when (message.mediaType) {
+                    MediaType.IMAGE -> {
+                        val file = message.mediaUri?.let { File(it) }
+                        if (file != null && file.exists()) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current).data(file).crossfade(true).build(),
+                                contentDescription = "Received Photo",
+                                modifier = Modifier.size(200.dp).clip(RoundedCornerShape(10.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Text("📷 [Image: ${message.fileName}]", color = Color.White, fontSize = 13.sp)
+                        }
+                    }
+                    MediaType.AUDIO_NOTE -> VoiceNoteBubble(isPlaying = isPlaying, text = message.text, onPlayClick = onPlayVoiceNote)
+                    else -> Text(message.text, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE6F1FF))
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End, modifier = Modifier.align(Alignment.End)) {
+                    val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp))
+                    Text(timeStr, fontSize = 10.sp, color = Color(0xFF8FA4C4), fontFamily = FontFamily.Monospace)
+                    if (message.isOutgoing) {
+                        Spacer(Modifier.width(4.dp))
+                        val (icon, tint) = when (message.status) {
+                            MessageStatus.SENDING -> Icons.Default.Check to Color.Gray
+                            MessageStatus.SENT -> Icons.Default.Check to Color(0xFF8FA4C4)
+                            MessageStatus.RELAYED -> Icons.Default.Hub to AmberMesh
+                            MessageStatus.DELIVERED -> Icons.Default.DoneAll to Color.LightGray
+                            MessageStatus.READ -> Icons.Default.DoneAll to CyanPrimary
+                            MessageStatus.FAILED -> Icons.Default.Close to RedAlert
+                        }
+                        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(13.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceNoteBubble(isPlaying: Boolean, text: String, onPlayClick: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+        IconButton(onClick = onPlayClick, modifier = Modifier.size(36.dp).clip(CircleShape).background(EmeraldSecure)) {
+            Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color(0xFF00220F), modifier = Modifier.size(20.dp))
+        }
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(text, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+            Text(if (isPlaying) "Playing voice note..." else "Tap to play", fontSize = 10.sp, color = EmeraldSecure)
+        }
+    }
+}
+
+@Composable
+private fun VoiceNoteRecordingBar(durationSec: Int, onCancel: () -> Unit, onSend: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(12.dp).clip(CircleShape).background(RedAlert))
+            Spacer(Modifier.width(10.dp))
+            Text("Recording 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            IconButton(onClick = onCancel, modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF162540))) {
+                Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.LightGray, modifier = Modifier.size(18.dp))
+            }
+            IconButton(onClick = onSend, modifier = Modifier.size(38.dp).clip(CircleShape).background(EmeraldSecure)) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color(0xFF00220F), modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}

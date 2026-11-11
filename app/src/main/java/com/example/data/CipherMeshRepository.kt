@@ -9,12 +9,14 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import com.example.crypto.CryptoManager
+import com.example.mesh.CallType
 import com.example.mesh.ChatMessage
 import com.example.mesh.MediaHeader
 import com.example.mesh.MediaType
 import com.example.mesh.MessageStatus
 import com.example.mesh.MeshPacket
 import com.example.mesh.PacketType
+import com.example.mesh.PeerNode
 import com.example.nearby.NearbyConnectionsManager
 import com.example.webrtc.WebRtcP2PManager
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +30,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.UUID
 
 class CipherMeshRepository(
@@ -38,12 +41,8 @@ class CipherMeshRepository(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = context.getSharedPreferences("ciphermesh_prefs", Context.MODE_PRIVATE)
 
-    val localNodeId: String = prefs.getString("local_node_id", null) ?: ("mesh-" + UUID.randomUUID().toString().take(8)).also {
-        prefs.edit().putString("local_node_id", it).apply()
-    }
-    val localNodeName: String = prefs.getString("local_node_name", null) ?: ("Ghost-" + localNodeId.takeLast(4).uppercase()).also {
-        prefs.edit().putString("local_node_name", it).apply()
-    }
+    val localNodeId: String
+    val localNodeName: String
 
     private val _conversations = MutableStateFlow>>(emptyMap())
     val conversations: StateFlow>> = _conversations.asStateFlow()
@@ -56,10 +55,10 @@ class CipherMeshRepository(
 
     private var mediaRecorder: MediaRecorder? = null
     private var currentVoiceNoteFile: File? = null
-    private val _isRecordingVoiceNote = MutableStateFlow<Boolean>(false)
+    private val _isRecordingVoiceNote = MutableStateFlow(false)
     val isRecordingVoiceNote: StateFlow<Boolean> = _isRecordingVoiceNote.asStateFlow()
 
-    private val _recordingDurationSec = MutableStateFlow<Int>(0)
+    private val _recordingDurationSec = MutableStateFlow(0)
     val recordingDurationSec: StateFlow<Int> = _recordingDurationSec.asStateFlow()
 
     private var mediaPlayer: MediaPlayer? = null
@@ -67,7 +66,22 @@ class CipherMeshRepository(
     val playingMessageId: StateFlow<String?> = _playingMessageId.asStateFlow()
 
     init {
+        var storedId = prefs.getString("local_node_id", null)
+        if (storedId == null) {
+            storedId = "mesh-" + UUID.randomUUID().toString().take(8)
+            prefs.edit().putString("local_node_id", storedId).apply()
+        }
+        localNodeId = storedId
+
+        var storedName = prefs.getString("local_node_name", null)
+        if (storedName == null) {
+            storedName = "Ghost-" + localNodeId.takeLast(4).uppercase()
+            prefs.edit().putString("local_node_name", storedName).apply()
+        }
+        localNodeName = storedName
+
         nearbyManager.initialize(localNodeId, localNodeName)
+
         val welcome = ChatMessage(
             id = "sys-welcome",
             senderId = "system",
@@ -81,18 +95,36 @@ class CipherMeshRepository(
         )
         _conversations.value = mapOf("*" to listOf(welcome))
 
-        scope.launch { nearbyManager.incomingPackets.collect { handleIncomingPacket(it) } }
-        scope.launch { nearbyManager.onFileReceived.collect { (h, f) -> handleCompletedFileReceived(h, f) } }
+        scope.launch {
+            nearbyManager.incomingPackets.collect { packet ->
+                handleIncomingPacket(packet)
+            }
+        }
+
+        scope.launch {
+            nearbyManager.onFileReceived.collect { (header, tempFile) ->
+                handleCompletedFileReceived(header, tempFile)
+            }
+        }
     }
 
-    fun selectPeer(peerId: String?) { _selectedPeerId.value = peerId }
-    fun markPeerVerified(peerId: String) { _verifiedPeers.value = _verifiedPeers.value + peerId }
+    fun selectPeer(peerId: String?) {
+        _selectedPeerId.value = peerId
+    }
+
+    fun markPeerVerified(peerId: String) {
+        _verifiedPeers.value = _verifiedPeers.value + peerId
+    }
 
     private fun handleIncomingPacket(packet: MeshPacket) {
         when (packet.packetType) {
             PacketType.TEXT_MESSAGE -> {
                 val key = nearbyManager.getSessionKey(packet.sourceNodeId)
-                val txt = try { CryptoManager.decryptText(packet.payloadCiphertext, key) } catch (e: Exception) { packet.payloadCiphertext }
+                val txt = try {
+                    CryptoManager.decryptText(packet.payloadCiphertext, key)
+                } catch (e: Exception) {
+                    packet.payloadCiphertext
+                }
                 val msg = ChatMessage(
                     id = packet.packetId,
                     senderId = packet.sourceNodeId,
@@ -108,12 +140,18 @@ class CipherMeshRepository(
                 )
                 val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
                 val list = _conversations.value[convKey] ?: emptyList()
-                if (list.none { it.id == msg.id }) _conversations.value = _conversations.value + (convKey to (list + msg))
+                if (list.none { it.id == msg.id }) {
+                    _conversations.value = _conversations.value + (convKey to (list + msg))
+                }
             }
             PacketType.DELIVERY_ACK -> {
                 val ackId = packet.payloadCiphertext
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
-                    msgs.map { if (it.id == ackId && it.status != MessageStatus.READ) it.copy(status = MessageStatus.DELIVERED) else it }
+                    msgs.map {
+                        if (it.id == ackId && it.status != MessageStatus.READ) {
+                            it.copy(status = MessageStatus.DELIVERED)
+                        } else it
+                    }
                 }
             }
             PacketType.READ_RECEIPT -> {
@@ -122,19 +160,22 @@ class CipherMeshRepository(
                     msgs.map { if (it.id == readId) it.copy(status = MessageStatus.READ) else it }
                 }
             }
-            PacketType.WEBRTC_SIGNAL -> webRtcManager.handleIncomingSignalPacket(packet)
+            PacketType.WEBRTC_SIGNAL -> {
+                webRtcManager.handleIncomingSignalPacket(packet)
+            }
             else -> {}
         }
     }
 
     private fun handleCompletedFileReceived(header: MediaHeader, tempFile: File) {
         try {
-            val safeDir = File(context.filesDir, "received_media").apply { mkdirs() }
+            val safeDir = File(context.filesDir, "received_media")
+            safeDir.mkdirs()
             val destFile = File(safeDir, "${header.messageId}_${header.fileName}")
             tempFile.copyTo(destFile, overwrite = true)
 
             val firstPeer = nearbyManager.connectedPeers.value.values.firstOrNull()
-            val peerId = _selectedPeerId.value?.takeIf { it != "*" } ?: firstPeer?.nodeId ?: "*"
+            val peerId = _selectedPeerId.value ?: firstPeer?.nodeId ?: "*"
             val msg = ChatMessage(
                 id = header.messageId,
                 senderId = peerId,
@@ -152,7 +193,9 @@ class CipherMeshRepository(
             )
             val list = _conversations.value[peerId] ?: emptyList()
             _conversations.value = _conversations.value + (peerId to (list + msg))
-        } catch (e: Exception) { Log.e("CipherMeshRepo", "File err: ${e.message}") }
+        } catch (e: Exception) {
+            Log.e("CipherMeshRepo", "File err: ${e.message}")
+        }
     }
 
     fun sendTextMessage(recipientId: String, text: String) {
@@ -186,10 +229,16 @@ class CipherMeshRepository(
 
     fun startVoiceNoteRecording() {
         try {
-            val dir = File(context.cacheDir, "voice_notes").apply { mkdirs() }
+            val dir = File(context.cacheDir, "voice_notes")
+            dir.mkdirs()
             val file = File(dir, "vn_${System.currentTimeMillis()}.m4a")
             currentVoiceNoteFile = file
-            mediaRecorder = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else @Suppress("DEPRECATION") MediaRecorder()).apply {
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }.apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -207,7 +256,9 @@ class CipherMeshRepository(
                     _recordingDurationSec.value += 1
                 }
             }
-        } catch (e: Exception) { _isRecordingVoiceNote.value = false }
+        } catch (e: Exception) {
+            _isRecordingVoiceNote.value = false
+        }
     }
 
     fun stopAndSendVoiceNote(recipientId: String) {
@@ -233,19 +284,27 @@ class CipherMeshRepository(
     }
 
     fun playVoiceNote(messageId: String, filePath: String) {
-        if (_playingMessageId.value == messageId) { stopVoiceNote(); return }
+        if (_playingMessageId.value == messageId) {
+            stopVoiceNote()
+            return
+        }
         stopVoiceNote()
         try {
-            FileInputStream(File(filePath)).use { fis ->
-                mediaPlayer = MediaPlayer().apply {
-                    setDataSource(fis.fd)
-                    prepare()
-                    start()
-                    setOnCompletionListener { _playingMessageId.value = null; it.release() }
+            val fis = FileInputStream(File(filePath))
+            mediaPlayer = MediaPlayer().apply {
+                setDataSource(fis.fd)
+                prepare()
+                start()
+                setOnCompletionListener {
+                    _playingMessageId.value = null
+                    it.release()
                 }
             }
+            fis.close()
             _playingMessageId.value = messageId
-        } catch (e: Exception) { _playingMessageId.value = null }
+        } catch (e: Exception) {
+            _playingMessageId.value = null
+        }
     }
 
     fun stopVoiceNote() {
@@ -259,7 +318,8 @@ class CipherMeshRepository(
         scope.launch {
             try {
                 val isVideo = mimeType.contains("video")
-                val tempFile = File(context.cacheDir, "media_${System.currentTimeMillis()}${if (isVideo) ".mp4" else ".jpg"}")
+                val ext = if (isVideo) ".mp4" else ".jpg"
+                val tempFile = File(context.cacheDir, "media_${System.currentTimeMillis()}$ext")
                 if (!isVideo) {
                     val bmp = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
                     if (bmp != null) {
@@ -269,16 +329,31 @@ class CipherMeshRepository(
                     }
                 }
                 if (!tempFile.exists() || tempFile.length() == 0L) {
-                    context.contentResolver.openInputStream(uri)?.use { inp -> FileOutputStream(tempFile).use { out -> inp.copyTo(out) } }
+                    val input: InputStream? = context.contentResolver.openInputStream(uri)
+                    if (input != null) {
+                        val out = FileOutputStream(tempFile)
+                        input.copyTo(out)
+                        input.close()
+                        out.close()
+                    }
                 }
                 if (tempFile.exists() && tempFile.length() > 0L) {
                     sendMediaFile(recipientId, tempFile, MediaType.IMAGE, tempFile.name, mimeType, 0)
                 }
-            } catch (e: Exception) { Log.e("CipherMeshRepo", "URI err: ${e.message}") }
+            } catch (e: Exception) {
+                Log.e("CipherMeshRepo", "URI err: ${e.message}")
+            }
         }
     }
 
-    private fun sendMediaFile(recipientId: String, file: File, mediaType: MediaType, fileName: String, mimeType: String, durationSeconds: Int) {
+    private fun sendMediaFile(
+        recipientId: String,
+        file: File,
+        mediaType: MediaType,
+        fileName: String,
+        mimeType: String,
+        durationSeconds: Int
+    ) {
         val messageId = UUID.randomUUID().toString()
         val header = MediaHeader(0L, messageId, mediaType, fileName, file.length(), mimeType, durationSeconds)
         val msg = ChatMessage(
@@ -302,6 +377,8 @@ class CipherMeshRepository(
 
         val peer = nearbyManager.connectedPeers.value.values.find { it.nodeId == recipientId || it.endpointId == recipientId }
         val targetEndpoint = peer?.endpointId ?: nearbyManager.connectedPeers.value.keys.firstOrNull()
-        if (targetEndpoint != null) nearbyManager.sendFile(targetEndpoint, file, header)
+        if (targetEndpoint != null) {
+            nearbyManager.sendFile(targetEndpoint, file, header)
+        }
     }
 }

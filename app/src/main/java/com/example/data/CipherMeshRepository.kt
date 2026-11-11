@@ -9,14 +9,12 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import com.example.crypto.CryptoManager
-import com.example.mesh.CallType
 import com.example.mesh.ChatMessage
 import com.example.mesh.MediaHeader
 import com.example.mesh.MediaType
 import com.example.mesh.MessageStatus
 import com.example.mesh.MeshPacket
 import com.example.mesh.PacketType
-import com.example.mesh.PeerNode
 import com.example.nearby.NearbyConnectionsManager
 import com.example.webrtc.WebRtcP2PManager
 import kotlinx.coroutines.CoroutineScope
@@ -24,7 +22,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.io.File
@@ -40,30 +37,43 @@ class CipherMeshRepository(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = context.getSharedPreferences("ciphermesh_prefs", Context.MODE_PRIVATE)
+    private val nullString: String? = null
 
     val localNodeId: String
     val localNodeName: String
 
-    private val _conversations = MutableStateFlow>>(emptyMap())
-    val conversations: StateFlow>> = _conversations.asStateFlow()
+    private val welcomeMessage = ChatMessage(
+        id = "sys-welcome",
+        senderId = "system",
+        senderName = "Mesh Core",
+        recipientId = "*",
+        text = "Welcome to CipherMesh. Zero-Internet P2P mesh network active.",
+        timestamp = System.currentTimeMillis(),
+        isOutgoing = false,
+        status = MessageStatus.DELIVERED,
+        hopCount = 0
+    )
 
-    private val _selectedPeerId = MutableStateFlow<String?>(null)
-    val selectedPeerId: StateFlow<String?> = _selectedPeerId.asStateFlow()
+    private val _conversations = MutableStateFlow(mapOf("*" to listOf(welcomeMessage)))
+    val conversations = _conversations.asStateFlow()
 
-    private val _verifiedPeers = MutableStateFlow<Set<String>>(emptySet())
-    val verifiedPeers: StateFlow<Set<String>> = _verifiedPeers.asStateFlow()
+    private val _selectedPeerId = MutableStateFlow(nullString)
+    val selectedPeerId = _selectedPeerId.asStateFlow()
+
+    private val _verifiedPeers = MutableStateFlow(setOf("init").minus("init"))
+    val verifiedPeers = _verifiedPeers.asStateFlow()
 
     private var mediaRecorder: MediaRecorder? = null
     private var currentVoiceNoteFile: File? = null
     private val _isRecordingVoiceNote = MutableStateFlow(false)
-    val isRecordingVoiceNote: StateFlow<Boolean> = _isRecordingVoiceNote.asStateFlow()
+    val isRecordingVoiceNote = _isRecordingVoiceNote.asStateFlow()
 
     private val _recordingDurationSec = MutableStateFlow(0)
-    val recordingDurationSec: StateFlow<Int> = _recordingDurationSec.asStateFlow()
+    val recordingDurationSec = _recordingDurationSec.asStateFlow()
 
     private var mediaPlayer: MediaPlayer? = null
-    private val _playingMessageId = MutableStateFlow<String?>(null)
-    val playingMessageId: StateFlow<String?> = _playingMessageId.asStateFlow()
+    private val _playingMessageId = MutableStateFlow(nullString)
+    val playingMessageId = _playingMessageId.asStateFlow()
 
     init {
         var storedId = prefs.getString("local_node_id", null)
@@ -81,19 +91,6 @@ class CipherMeshRepository(
         localNodeName = storedName
 
         nearbyManager.initialize(localNodeId, localNodeName)
-
-        val welcome = ChatMessage(
-            id = "sys-welcome",
-            senderId = "system",
-            senderName = "Mesh Core",
-            recipientId = "*",
-            text = "Welcome to CipherMesh. Zero-Internet P2P mesh network active.",
-            timestamp = System.currentTimeMillis(),
-            isOutgoing = false,
-            status = MessageStatus.DELIVERED,
-            hopCount = 0
-        )
-        _conversations.value = mapOf("*" to listOf(welcome))
 
         scope.launch {
             nearbyManager.incomingPackets.collect { packet ->

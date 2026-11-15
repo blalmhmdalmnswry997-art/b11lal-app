@@ -7,6 +7,7 @@ import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.util.Base64
 import android.util.Log
 import com.example.crypto.CryptoManager
 import com.example.mesh.ChatMessage
@@ -23,11 +24,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.util.Collections
 import java.util.UUID
 
 class CipherMeshRepository(
@@ -37,6 +42,11 @@ class CipherMeshRepository(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = context.getSharedPreferences("ciphermesh_prefs", Context.MODE_PRIVATE)
+    private val dbLock = Any()
+
+    private val chatsDbFile = File(context.filesDir, "ciphermesh_chats_db.json")
+    private val outboxDbFile = File(context.filesDir, "ciphermesh_outbox_db.json")
+
     private val nullString: String? = null
 
     val localNodeId: String
@@ -45,14 +55,16 @@ class CipherMeshRepository(
     private val welcomeMessage = ChatMessage(
         id = "sys-welcome",
         senderId = "system",
-        senderName = "Mesh Core",
+        senderName = "نظام الشبكة",
         recipientId = "*",
-        text = "Welcome to CipherMesh. Zero-Internet P2P mesh network active.",
+        text = "مرحباً بك في CipherMesh. المحادثات الدائمة والمزامنة الذكية بدون إنترنت نشطة.",
         timestamp = System.currentTimeMillis(),
         isOutgoing = false,
         status = MessageStatus.DELIVERED,
         hopCount = 0
     )
+
+    private val emptyMsgList = listOf(welcomeMessage).minus(welcomeMessage)
 
     private val _conversations = MutableStateFlow(mapOf("*" to listOf(welcomeMessage)))
     val conversations = _conversations.asStateFlow()
@@ -62,6 +74,21 @@ class CipherMeshRepository(
 
     private val _verifiedPeers = MutableStateFlow(setOf("init").minus("init"))
     val verifiedPeers = _verifiedPeers.asStateFlow()
+
+    private val dummyPacket by lazy {
+        MeshPacket(
+            sourceNodeId = "",
+            sourceNodeName = "",
+            destinationNodeId = "",
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = ""
+        )
+    }
+
+    // Smart Store-and-Forward Outbox Queue (messageId -> Pair(PlainText, MeshPacket))
+    private val pendingOutbox by lazy {
+        Collections.synchronizedMap(mutableMapOf("init" to Pair("", dummyPacket)).apply { clear() })
+    }
 
     private var mediaRecorder: MediaRecorder? = null
     private var currentVoiceNoteFile: File? = null
@@ -90,6 +117,10 @@ class CipherMeshRepository(
         }
         localNodeName = storedName
 
+        loadVerifiedPeersFromPrefs()
+        loadConversationsFromDisk()
+        loadOutboxFromDisk()
+
         nearbyManager.initialize(localNodeId, localNodeName)
 
         scope.launch {
@@ -103,15 +134,281 @@ class CipherMeshRepository(
                 handleCompletedFileReceived(header, tempFile)
             }
         }
+
+        // Smart Sync: Flush queued messages as soon as a peer connects
+        scope.launch {
+            nearbyManager.connectedPeers.collect { peers ->
+                if (peers.isNotEmpty()) {
+                    delay(800)
+                    flushPendingOutbox()
+                }
+            }
+        }
+
+        // Periodic background sync for multi-hop store-and-forward delivery
+        scope.launch {
+            while (isActive) {
+                delay(6000)
+                if (nearbyManager.connectedPeers.value.isNotEmpty() && pendingOutbox.isNotEmpty()) {
+                    flushPendingOutbox()
+                }
+            }
+        }
     }
 
     fun selectPeer(peerId: String?) {
         _selectedPeerId.value = peerId
+        if (peerId != null && peerId != "*") {
+            sendReadReceiptsForPeer(peerId)
+        }
     }
 
     fun markPeerVerified(peerId: String) {
         _verifiedPeers.value = _verifiedPeers.value + peerId
+        prefs.edit().putStringSet("verified_peers", _verifiedPeers.value).apply()
     }
+
+    private fun loadVerifiedPeersFromPrefs() {
+        val saved = prefs.getStringSet("verified_peers", null)
+        if (saved != null) {
+            _verifiedPeers.value = saved.toSet()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Persistent Local Database (Conversations & Smart Outbox)
+    // -------------------------------------------------------------------------
+
+    private fun saveConversationsToDisk() {
+        scope.launch {
+            synchronized(dbLock) {
+                try {
+                    val root = JSONObject()
+                    val currentMap = _conversations.value
+                    for ((peerKey, msgList) in currentMap) {
+                        val arr = JSONArray()
+                        for (msg in msgList) {
+                            val obj = JSONObject()
+                            obj.put("id", msg.id)
+                            obj.put("senderId", msg.senderId)
+                            obj.put("senderName", msg.senderName)
+                            obj.put("recipientId", msg.recipientId)
+                            obj.put("text", msg.text)
+                            obj.put("mediaType", msg.mediaType.name)
+                            obj.put("mediaUri", msg.mediaUri ?: "")
+                            obj.put("fileName", msg.fileName ?: "")
+                            obj.put("fileSizeBytes", msg.fileSizeBytes)
+                            obj.put("timestamp", msg.timestamp)
+                            obj.put("isOutgoing", msg.isOutgoing)
+                            obj.put("status", msg.status.name)
+                            obj.put("hopCount", msg.hopCount)
+                            obj.put("isEncrypted", msg.isEncrypted)
+
+                            val relayArr = JSONArray()
+                            for (hop in msg.relayPath) {
+                                relayArr.put(hop)
+                            }
+                            obj.put("relayPath", relayArr)
+                            arr.put(obj)
+                        }
+                        root.put(peerKey, arr)
+                    }
+                    chatsDbFile.writeText(root.toString(), Charsets.UTF_8)
+                } catch (e: Exception) {
+                    Log.e("CipherMeshRepo", "Save DB err: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun loadConversationsFromDisk() {
+        synchronized(dbLock) {
+            try {
+                if (!chatsDbFile.exists()) return
+                val content = chatsDbFile.readText(Charsets.UTF_8)
+                if (content.isBlank()) return
+
+                val root = JSONObject(content)
+                var loadedMap = mapOf("*" to listOf(welcomeMessage)).minus("*")
+                val keys = root.keys()
+
+                while (keys.hasNext()) {
+                    val peerKey = keys.next()
+                    val arr = root.optJSONArray(peerKey) ?: continue
+                    var msgList = emptyMsgList
+
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val mediaTypeStr = obj.optString("mediaType", MediaType.NONE.name)
+                        val mediaType = try {
+                            MediaType.valueOf(mediaTypeStr)
+                        } catch (e: Exception) {
+                            MediaType.NONE
+                        }
+
+                        val statusStr = obj.optString("status", MessageStatus.SENT.name)
+                        val status = try {
+                            MessageStatus.valueOf(statusStr)
+                        } catch (e: Exception) {
+                            MessageStatus.SENT
+                        }
+
+                        val relayArr = obj.optJSONArray("relayPath")
+                        val relays = mutableListOf("init").apply { clear() }
+                        if (relayArr != null) {
+                            for (j in 0 until relayArr.length()) {
+                                val hop = relayArr.optString(j, "")
+                                if (hop.isNotEmpty()) relays.add(hop)
+                            }
+                        }
+
+                        val rawUri = obj.optString("mediaUri", "")
+                        val rawFile = obj.optString("fileName", "")
+
+                        val msg = ChatMessage(
+                            id = obj.optString("id", UUID.randomUUID().toString()),
+                            senderId = obj.optString("senderId", ""),
+                            senderName = obj.optString("senderName", ""),
+                            recipientId = obj.optString("recipientId", peerKey),
+                            text = obj.optString("text", ""),
+                            mediaType = mediaType,
+                            mediaUri = rawUri.ifEmpty { null },
+                            fileName = rawFile.ifEmpty { null },
+                            fileSizeBytes = obj.optLong("fileSizeBytes", 0L),
+                            timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
+                            isOutgoing = obj.optBoolean("isOutgoing", false),
+                            status = status,
+                            hopCount = obj.optInt("hopCount", 0),
+                            relayPath = relays,
+                            isEncrypted = obj.optBoolean("isEncrypted", true)
+                        )
+                        msgList = msgList + msg
+                    }
+
+                    if (msgList.isNotEmpty()) {
+                        loadedMap = loadedMap + (peerKey to msgList)
+                    }
+                }
+
+                if (loadedMap.isNotEmpty()) {
+                    if (!loadedMap.containsKey("*")) {
+                        loadedMap = loadedMap + ("*" to listOf(welcomeMessage))
+                    }
+                    _conversations.value = loadedMap
+                }
+            } catch (e: Exception) {
+                Log.e("CipherMeshRepo", "Load DB err: ${e.message}")
+            }
+        }
+    }
+
+    private fun saveOutboxToDisk() {
+        scope.launch {
+            synchronized(dbLock) {
+                try {
+                    val arr = JSONArray()
+                    val snapshot = synchronized(pendingOutbox) { pendingOutbox.toMap() }
+                    for ((msgId, pair) in snapshot) {
+                        val obj = JSONObject()
+                        obj.put("msgId", msgId)
+                        obj.put("plainText", pair.first)
+                        obj.put("packetB64", Base64.encodeToString(pair.second.toByteArray(), Base64.NO_WRAP))
+                        arr.put(obj)
+                    }
+                    outboxDbFile.writeText(arr.toString(), Charsets.UTF_8)
+                } catch (e: Exception) {
+                    Log.e("CipherMeshRepo", "Save outbox err: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun loadOutboxFromDisk() {
+        synchronized(dbLock) {
+            try {
+                if (!outboxDbFile.exists()) return
+                val content = outboxDbFile.readText(Charsets.UTF_8)
+                if (content.isBlank()) return
+                val arr = JSONArray(content)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val msgId = obj.optString("msgId", "")
+                    val plainText = obj.optString("plainText", "")
+                    val b64 = obj.optString("packetB64", "")
+                    if (msgId.isNotEmpty() && b64.isNotEmpty()) {
+                        val bytes = Base64.decode(b64, Base64.NO_WRAP)
+                        val pkt = MeshPacket.fromByteArray(bytes)
+                        if (pkt != null) {
+                            pendingOutbox[msgId] = Pair(plainText, pkt)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("CipherMeshRepo", "Load outbox err: ${e.message}")
+            }
+        }
+    }
+
+    private fun flushPendingOutbox() {
+        val snapshot = synchronized(pendingOutbox) { pendingOutbox.toMap() }
+        if (snapshot.isEmpty()) return
+
+        var statusUpdated = false
+        for ((msgId, pair) in snapshot) {
+            val plainText = pair.first
+            val originalPacket = pair.second
+            val recipientId = originalPacket.destinationNodeId
+
+            val reEncrypted = if (plainText.isNotEmpty()) {
+                CryptoManager.encryptText(plainText, nearbyManager.getSessionKey(recipientId))
+            } else {
+                originalPacket.payloadCiphertext
+            }
+
+            val updatedPacket = originalPacket.copy(payloadCiphertext = reEncrypted)
+            nearbyManager.sendMeshPacket(updatedPacket)
+
+            if (recipientId == "*") {
+                pendingOutbox.remove(msgId)
+            }
+
+            _conversations.value = _conversations.value.mapValues { (_, msgs) ->
+                msgs.map {
+                    if (it.id == msgId && it.status == MessageStatus.SENDING) {
+                        statusUpdated = true
+                        it.copy(status = MessageStatus.SENT)
+                    } else it
+                }
+            }
+        }
+
+        saveOutboxToDisk()
+        if (statusUpdated) {
+            saveConversationsToDisk()
+        }
+    }
+
+    private fun sendReadReceiptsForPeer(peerId: String) {
+        val msgs = _conversations.value[peerId] ?: return
+        for (msg in msgs) {
+            if (!msg.isOutgoing) {
+                val readPacket = MeshPacket(
+                    sourceNodeId = localNodeId,
+                    sourceNodeName = localNodeName,
+                    destinationNodeId = peerId,
+                    ttl = 5,
+                    hopCount = 0,
+                    packetType = PacketType.READ_RECEIPT,
+                    payloadCiphertext = msg.id
+                )
+                nearbyManager.sendMeshPacket(readPacket)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Incoming Packets & Media Handling
+    // -------------------------------------------------------------------------
 
     private fun handleIncomingPacket(packet: MeshPacket) {
         when (packet.packetType) {
@@ -136,13 +433,28 @@ class CipherMeshRepository(
                     isEncrypted = true
                 )
                 val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
-                val list = _conversations.value[convKey] ?: emptyList()
+                val list = _conversations.value[convKey] ?: emptyMsgList
                 if (list.none { it.id == msg.id }) {
                     _conversations.value = _conversations.value + (convKey to (list + msg))
+                    saveConversationsToDisk()
+                }
+                if (_selectedPeerId.value == convKey && !packet.isBroadcast) {
+                    val readPacket = MeshPacket(
+                        sourceNodeId = localNodeId,
+                        sourceNodeName = localNodeName,
+                        destinationNodeId = packet.sourceNodeId,
+                        ttl = 5,
+                        hopCount = 0,
+                        packetType = PacketType.READ_RECEIPT,
+                        payloadCiphertext = packet.packetId
+                    )
+                    nearbyManager.sendMeshPacket(readPacket)
                 }
             }
             PacketType.DELIVERY_ACK -> {
                 val ackId = packet.payloadCiphertext
+                pendingOutbox.remove(ackId)
+                saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map {
                         if (it.id == ackId && it.status != MessageStatus.READ) {
@@ -150,12 +462,16 @@ class CipherMeshRepository(
                         } else it
                     }
                 }
+                saveConversationsToDisk()
             }
             PacketType.READ_RECEIPT -> {
                 val readId = packet.payloadCiphertext
+                pendingOutbox.remove(readId)
+                saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map { if (it.id == readId) it.copy(status = MessageStatus.READ) else it }
                 }
+                saveConversationsToDisk()
             }
             PacketType.WEBRTC_SIGNAL -> {
                 webRtcManager.handleIncomingSignalPacket(packet)
@@ -176,9 +492,9 @@ class CipherMeshRepository(
             val msg = ChatMessage(
                 id = header.messageId,
                 senderId = peerId,
-                senderName = firstPeer?.nodeName ?: "Peer",
+                senderName = firstPeer?.nodeName ?: "متصل",
                 recipientId = localNodeId,
-                text = if (header.mediaType == MediaType.AUDIO_NOTE) "Voice Note (${header.durationSeconds}s)" else header.fileName,
+                text = if (header.mediaType == MediaType.AUDIO_NOTE) "رسالة صوتية (${header.durationSeconds} ثانية)" else header.fileName,
                 mediaType = header.mediaType,
                 mediaUri = destFile.absolutePath,
                 fileName = header.fileName,
@@ -188,8 +504,11 @@ class CipherMeshRepository(
                 status = MessageStatus.DELIVERED,
                 isEncrypted = true
             )
-            val list = _conversations.value[peerId] ?: emptyList()
-            _conversations.value = _conversations.value + (peerId to (list + msg))
+            val list = _conversations.value[peerId] ?: emptyMsgList
+            if (list.none { it.id == msg.id }) {
+                _conversations.value = _conversations.value + (peerId to (list + msg))
+                saveConversationsToDisk()
+            }
         } catch (e: Exception) {
             Log.e("CipherMeshRepo", "File err: ${e.message}")
         }
@@ -206,6 +525,10 @@ class CipherMeshRepository(
             packetType = PacketType.TEXT_MESSAGE,
             payloadCiphertext = encrypted
         )
+
+        val hasConnectedPeers = nearbyManager.connectedPeers.value.isNotEmpty()
+        val initialStatus = if (hasConnectedPeers) MessageStatus.SENT else MessageStatus.SENDING
+
         val msg = ChatMessage(
             id = packet.packetId,
             senderId = localNodeId,
@@ -214,23 +537,36 @@ class CipherMeshRepository(
             text = text,
             timestamp = System.currentTimeMillis(),
             isOutgoing = true,
-            status = MessageStatus.SENT,
+            status = initialStatus,
             hopCount = 0,
             isEncrypted = true
         )
         val key = if (recipientId == "*") "*" else recipientId
-        val list = _conversations.value[key] ?: emptyList()
+        val list = _conversations.value[key] ?: emptyMsgList
         _conversations.value = _conversations.value + (key to (list + msg))
-        nearbyManager.sendMeshPacket(packet)
+        saveConversationsToDisk()
+
+        if (recipientId != "*" || !hasConnectedPeers) {
+            pendingOutbox[packet.packetId] = Pair(text, packet)
+            saveOutboxToDisk()
+        }
+
+        if (hasConnectedPeers) {
+            nearbyManager.sendMeshPacket(packet)
+        }
     }
+
+    // -------------------------------------------------------------------------
+    // Voice Notes & Media Attachments
+    // -------------------------------------------------------------------------
 
     fun startVoiceNoteRecording() {
         try {
-            val dir = File(context.cacheDir, "voice_notes")
+            val dir = File(context.filesDir, "voice_notes")
             dir.mkdirs()
             val file = File(dir, "vn_${System.currentTimeMillis()}.m4a")
             currentVoiceNoteFile = file
-            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            mediaRecorder = if (Build.VERSION.SDK_INT in Build.VERSION_CODES.S..Int.MAX_VALUE) {
                 MediaRecorder(context)
             } else {
                 @Suppress("DEPRECATION")
@@ -266,7 +602,7 @@ class CipherMeshRepository(
         try { mediaRecorder?.release() } catch (e: Exception) {}
         mediaRecorder = null
         val file = currentVoiceNoteFile
-        if (file != null && file.exists() && file.length() > 0L) {
+        if (file != null && file.exists() && file.length() in 1L..Long.MAX_VALUE) {
             sendMediaFile(recipientId, file, MediaType.AUDIO_NOTE, file.name, "audio/m4a", duration)
         }
     }
@@ -316,26 +652,28 @@ class CipherMeshRepository(
             try {
                 val isVideo = mimeType.contains("video")
                 val ext = if (isVideo) ".mp4" else ".jpg"
-                val tempFile = File(context.cacheDir, "media_${System.currentTimeMillis()}$ext")
+                val mediaDir = File(context.filesDir, "sent_media")
+                mediaDir.mkdirs()
+                val permFile = File(mediaDir, "media_${System.currentTimeMillis()}$ext")
                 if (!isVideo) {
                     val bmp = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
                     if (bmp != null) {
                         val r = minOf(1024f / bmp.width, 1024f / bmp.height, 1f)
                         val scaled = Bitmap.createScaledBitmap(bmp, (bmp.width * r).toInt(), (bmp.height * r).toInt(), true)
-                        FileOutputStream(tempFile).use { scaled.compress(Bitmap.CompressFormat.JPEG, 75, it) }
+                        FileOutputStream(permFile).use { scaled.compress(Bitmap.CompressFormat.JPEG, 75, it) }
                     }
                 }
-                if (!tempFile.exists() || tempFile.length() == 0L) {
+                if (!permFile.exists() || permFile.length() == 0L) {
                     val input: InputStream? = context.contentResolver.openInputStream(uri)
                     if (input != null) {
-                        val out = FileOutputStream(tempFile)
+                        val out = FileOutputStream(permFile)
                         input.copyTo(out)
                         input.close()
                         out.close()
                     }
                 }
-                if (tempFile.exists() && tempFile.length() > 0L) {
-                    sendMediaFile(recipientId, tempFile, MediaType.IMAGE, tempFile.name, mimeType, 0)
+                if (permFile.exists() && permFile.length() in 1L..Long.MAX_VALUE) {
+                    sendMediaFile(recipientId, permFile, MediaType.IMAGE, permFile.name, mimeType, 0)
                 }
             } catch (e: Exception) {
                 Log.e("CipherMeshRepo", "URI err: ${e.message}")
@@ -358,7 +696,7 @@ class CipherMeshRepository(
             senderId = localNodeId,
             senderName = localNodeName,
             recipientId = recipientId,
-            text = if (mediaType == MediaType.AUDIO_NOTE) "Voice Note (${durationSeconds}s)" else fileName,
+            text = if (mediaType == MediaType.AUDIO_NOTE) "رسالة صوتية (${durationSeconds} ثانية)" else fileName,
             mediaType = mediaType,
             mediaUri = file.absolutePath,
             fileName = fileName,
@@ -369,8 +707,9 @@ class CipherMeshRepository(
             isEncrypted = true
         )
         val key = if (recipientId == "*") "*" else recipientId
-        val list = _conversations.value[key] ?: emptyList()
+        val list = _conversations.value[key] ?: emptyMsgList
         _conversations.value = _conversations.value + (key to (list + msg))
+        saveConversationsToDisk()
 
         val peer = nearbyManager.connectedPeers.value.values.find { it.nodeId == recipientId || it.endpointId == recipientId }
         val targetEndpoint = peer?.endpointId ?: nearbyManager.connectedPeers.value.keys.firstOrNull()

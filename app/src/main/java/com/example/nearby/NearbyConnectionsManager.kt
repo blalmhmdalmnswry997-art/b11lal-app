@@ -61,13 +61,15 @@ class NearbyConnectionsManager(private val context: Context) {
         private const val TAG = "NearbyManager"
         private const val SERVICE_ID = "com.example.ciphermesh.p2p"
         val STRATEGY: Strategy = Strategy.P2P_CLUSTER
-        private const val MAX_SEEN_PACKETS = 5000
+        private const val MAX_SEEN_PACKETS = 8000
         private const val LAN_UDP_PORT = 45454
         private const val LAN_TCP_PORT = 45455
+        private const val DEFAULT_MESH_TTL = 12
     }
 
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val prefs = context.getSharedPreferences("ciphermesh_network_prefs", Context.MODE_PRIVATE)
 
     var localNodeId: String = UUID.randomUUID().toString()
         private set
@@ -76,6 +78,7 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private val dummyPeer = PeerNode(endpointId = "", nodeId = "", nodeName = "")
     private val emptyPeers = mapOf("init" to dummyPeer).minus("init")
+    private val emptyStringList = listOf("init").minus("init")
 
     private val _isAdvertising = MutableStateFlow(false)
     val isAdvertising = _isAdvertising.asStateFlow()
@@ -88,6 +91,10 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private val _connectedPeers = MutableStateFlow(emptyPeers)
     val connectedPeers = _connectedPeers.asStateFlow()
+
+    // Saved Gateway / Bridge IPs for linking different markets, routers, and local servers
+    private val _gatewayIps = MutableStateFlow(emptyStringList)
+    val gatewayIps = _gatewayIps.asStateFlow()
 
     private val dummyPacket = MeshPacket(
         sourceNodeId = "",
@@ -118,6 +125,9 @@ class NearbyConnectionsManager(private val context: Context) {
         Collections.synchronizedMap(mutableMapOf("init" to defaultSecretKey).apply { clear() })
     }
 
+    // Next-hop routing table: maps remote multi-hop nodeId -> direct nextHopEndpointId
+    private val nextHopRoutes = Collections.synchronizedMap(mutableMapOf("init" to "init").apply { clear() })
+
     private val _packetsForwardedCount = MutableStateFlow(0)
     val packetsForwardedCount = _packetsForwardedCount.asStateFlow()
 
@@ -141,7 +151,6 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private val seenPacketIds = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
 
-    // Wi-Fi LAN Sockets & State
     private val dummyOut = DataOutputStream(ByteArrayOutputStream())
     private val lanOutputs = Collections.synchronizedMap(mutableMapOf("init" to dummyOut).apply { clear() })
     private val connectingLanIps = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
@@ -149,6 +158,10 @@ class NearbyConnectionsManager(private val context: Context) {
     private var udpSocket: DatagramSocket? = null
     private var tcpServer: ServerSocket? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+
+    init {
+        loadSavedGateways()
+    }
 
     private fun markPacketSeen(packetId: String): Boolean {
         synchronized(seenPacketIds) {
@@ -167,6 +180,70 @@ class NearbyConnectionsManager(private val context: Context) {
     fun initialize(nodeId: String, nodeName: String) {
         this.localNodeId = nodeId
         this.localNodeName = nodeName
+    }
+
+    // -------------------------------------------------------------------------
+    // Inter-Network Gateways & Local Server Management
+    // -------------------------------------------------------------------------
+
+    private fun loadSavedGateways() {
+        val saved = prefs.getStringSet("saved_gateways", null)
+        if (saved != null) {
+            _gatewayIps.value = saved.toList().sorted()
+        }
+    }
+
+    fun addGatewayIp(rawIp: String) {
+        val cleaned = rawIp.trim()
+        if (cleaned.isEmpty()) return
+        val updated = (_gatewayIps.value + cleaned).distinct().sorted()
+        _gatewayIps.value = updated
+        prefs.edit().putStringSet("saved_gateways", updated.toSet()).apply()
+
+        // Immediately probe the new gateway or remote market router
+        scope.launch {
+            probeGatewayOrSubnet(cleaned)
+        }
+    }
+
+    fun removeGatewayIp(ip: String) {
+        val updated = _gatewayIps.value.filter { it != ip }
+        _gatewayIps.value = updated
+        prefs.edit().putStringSet("saved_gateways", updated.toSet()).apply()
+        disconnect("lan-$ip")
+    }
+
+    fun getPrimaryLocalIp(): String {
+        val ips = getLocalIPv4Addresses()
+        return ips.firstOrNull() ?: "غير متصل بالواي فاي"
+    }
+
+    private fun probeGatewayOrSubnet(target: String) {
+        try {
+            val beaconBytes = "CMESH|$localNodeId|$localNodeName|$LAN_TCP_PORT".toByteArray(Charsets.UTF_8)
+            val sender = udpSocket ?: DatagramSocket().apply { broadcast = true }
+            if (target.endsWith(".0") || target.endsWith(".255")) {
+                val parts = target.split(".")
+                if (parts.size == 4) {
+                    val prefix = "${parts[0]}.${parts[1]}.${parts[2]}."
+                    try {
+                        sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName("${prefix}255"), LAN_UDP_PORT))
+                    } catch (e: Exception) {}
+                    for (host in 1..254) {
+                        try {
+                            sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName("$prefix$host"), LAN_UDP_PORT))
+                        } catch (e: Exception) {}
+                    }
+                }
+            } else {
+                try {
+                    sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName(target), LAN_UDP_PORT))
+                } catch (e: Exception) {}
+                onLanPeerDiscovered(target, "gw-$target", "بوابة-$target")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Probe gateway err: ${e.message}")
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -276,7 +353,7 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // Wi-Fi Local Network (LAN) Engine (Buildings, Markets, Malls without Internet)
+    // Wi-Fi Local Network (LAN) & Multi-Subnet Bridge Engine
     // -------------------------------------------------------------------------
 
     private fun startLanEngine() {
@@ -293,7 +370,7 @@ class NearbyConnectionsManager(private val context: Context) {
             }
         } catch (e: Exception) {}
 
-        // 1. TCP Server for incoming Wi-Fi peer connections
+        // 1. TCP Server for incoming Wi-Fi & Inter-Market Gateway connections
         scope.launch {
             try {
                 tcpServer = ServerSocket(LAN_TCP_PORT)
@@ -307,7 +384,7 @@ class NearbyConnectionsManager(private val context: Context) {
             }
         }
 
-        // 2. UDP Listener for peer beacons on the same Wi-Fi router
+        // 2. UDP Listener for beacons across local Wi-Fi and remote subnets
         scope.launch {
             try {
                 udpSocket = DatagramSocket(null).apply {
@@ -337,7 +414,7 @@ class NearbyConnectionsManager(private val context: Context) {
             }
         }
 
-        // 3. UDP Beacon Broadcaster + Subnet Unicast Sweep (Bypasses router broadcast isolation)
+        // 3. UDP Broadcaster + Subnet Sweep + Inter-Market Gateway Connector + Mesh Route Announcer
         scope.launch {
             var tick = 0
             while (isLanRunning) {
@@ -345,12 +422,10 @@ class NearbyConnectionsManager(private val context: Context) {
                     val beaconBytes = "CMESH|$localNodeId|$localNodeName|$LAN_TCP_PORT".toByteArray(Charsets.UTF_8)
                     val sender = udpSocket ?: DatagramSocket().apply { broadcast = true }
 
-                    // Send to global broadcast
                     try {
                         sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName("255.255.255.255"), LAN_UDP_PORT))
                     } catch (e: Exception) {}
 
-                    // Send to local Wi-Fi interface broadcast and subnet unicast sweep
                     val localIps = getLocalIPv4Addresses()
                     for (ip in localIps) {
                         val parts = ip.split(".")
@@ -360,7 +435,6 @@ class NearbyConnectionsManager(private val context: Context) {
                                 sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName("${prefix}255"), LAN_UDP_PORT))
                             } catch (e: Exception) {}
 
-                            // Sweep subnet every 3rd cycle to bypass public router broadcast filters
                             if (tick % 3 == 0) {
                                 for (host in 1..254) {
                                     val targetIp = "$prefix$host"
@@ -373,6 +447,20 @@ class NearbyConnectionsManager(private val context: Context) {
                             }
                         }
                     }
+
+                    // Probe configured remote gateways / other market networks
+                    val configuredGateways = _gatewayIps.value
+                    for (gw in configuredGateways) {
+                        if (!localIps.contains(gw)) {
+                            probeGatewayOrSubnet(gw)
+                        }
+                    }
+
+                    // Every 4th cycle, announce our presence & public key across multi-hop bridges
+                    if (tick % 4 == 0 && _connectedPeers.value.isNotEmpty()) {
+                        broadcastMultiHopPresence()
+                    }
+
                     tick += 1
                 } catch (e: Exception) {}
                 delay(2500)
@@ -412,8 +500,11 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     private fun onLanPeerDiscovered(ip: String, peerNodeId: String, peerName: String) {
+        val localIps = getLocalIPv4Addresses()
+        if (localIps.contains(ip)) return
+
         val endpointId = "lan-$ip"
-        val alreadyConnected = _connectedPeers.value.values.any { it.endpointId == endpointId || it.nodeId == peerNodeId }
+        val alreadyConnected = lanOutputs.containsKey(endpointId)
         if (alreadyConnected || !connectingLanIps.add(ip)) return
 
         scope.launch {
@@ -422,7 +513,7 @@ class NearbyConnectionsManager(private val context: Context) {
                 socket.connect(InetSocketAddress(ip, LAN_TCP_PORT), 3000)
                 handleLanSocket(socket, endpointId, peerNodeId, "$peerName (Wi-Fi)")
             } catch (e: Exception) {
-                // Peer may initiate connection to us instead
+                // Remote peer may initiate connection to us or is currently offline
             } finally {
                 connectingLanIps.remove(ip)
             }
@@ -448,6 +539,10 @@ class NearbyConnectionsManager(private val context: Context) {
                 )
                 _connectedPeers.value = _connectedPeers.value + (endpointId to peerNode)
                 sendKeyExchange(endpointId)
+
+                // Share all known peers with the newly connected bridge/peer
+                delay(400)
+                announceKnownPeersToEndpoint(endpointId)
 
                 while (isLanRunning && !socket.isClosed) {
                     val frameType = dis.readByte().toInt()
@@ -551,20 +646,56 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // Key Exchange & Mesh Routing
+    // Multi-Hop Key Exchange, Peer Directory & Mesh Routing
     // -------------------------------------------------------------------------
 
     private fun sendKeyExchange(endpointId: String) {
         val packet = MeshPacket(
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
-            destinationNodeId = endpointId,
-            ttl = 1,
+            destinationNodeId = "*",
+            ttl = 6,
+            hopCount = 0,
             packetType = PacketType.KEY_EXCHANGE,
             payloadCiphertext = CryptoManager.localPublicKeyBase64,
             extraMeta = CryptoManager.localFingerprint
         )
+        markPacketSeen(packet.packetId)
         sendDirectPayload(endpointId, packet.toByteArray())
+    }
+
+    private fun broadcastMultiHopPresence() {
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = "*",
+            ttl = 6,
+            hopCount = 0,
+            packetType = PacketType.KEY_EXCHANGE,
+            payloadCiphertext = CryptoManager.localPublicKeyBase64,
+            extraMeta = CryptoManager.localFingerprint
+        )
+        sendMeshPacket(packet)
+    }
+
+    private fun announceKnownPeersToEndpoint(targetEndpointId: String) {
+        val snapshot = _connectedPeers.value.values.toList()
+        for (peer in snapshot) {
+            if (peer.endpointId != targetEndpointId && peer.publicKeyBase64.isNotEmpty()) {
+                val gossipPacket = MeshPacket(
+                    sourceNodeId = peer.nodeId,
+                    sourceNodeName = peer.nodeName.replace(" (Wi-Fi)", ""),
+                    destinationNodeId = "*",
+                    ttl = 5,
+                    hopCount = peer.hops,
+                    relayedBy = listOf(localNodeName),
+                    packetType = PacketType.KEY_EXCHANGE,
+                    payloadCiphertext = peer.publicKeyBase64,
+                    extraMeta = peer.fingerprint
+                )
+                sendDirectPayload(targetEndpointId, gossipPacket.toByteArray())
+            }
+        }
     }
 
     fun getSessionKey(peerNodeIdOrEndpoint: String): SecretKey {
@@ -582,12 +713,20 @@ class NearbyConnectionsManager(private val context: Context) {
         }
 
         val packet = MeshPacket.fromByteArray(bytes) ?: return
+        if (packet.sourceNodeId == localNodeId) return
+
         _packetsReceivedCount.value += 1
 
         if (!markPacketSeen(packet.packetId)) return
 
+        // Record the return route to the sender via the endpoint from which this packet arrived
+        nextHopRoutes[packet.sourceNodeId] = incomingEndpointId
+
         if (packet.packetType == PacketType.KEY_EXCHANGE) {
             handleKeyExchangePacket(incomingEndpointId, packet)
+            if (packet.ttl in 2..Int.MAX_VALUE) {
+                relayPacket(packet, incomingEndpointId)
+            }
             return
         }
 
@@ -621,27 +760,54 @@ class NearbyConnectionsManager(private val context: Context) {
         }
     }
 
-    private fun handleKeyExchangePacket(endpointId: String, packet: MeshPacket) {
+    private fun handleKeyExchangePacket(incomingEndpointId: String, packet: MeshPacket) {
         try {
             val peerPubKeyBase64 = packet.payloadCiphertext
             val sharedKey = CryptoManager.deriveSharedSecretFromBase64(peerPubKeyBase64)
-            peerSessionKeys[endpointId] = sharedKey
             peerSessionKeys[packet.sourceNodeId] = sharedKey
 
-            val existing = _connectedPeers.value[endpointId]
-            val displayName = if (endpointId.startsWith("lan-") && !packet.sourceNodeName.contains("Wi-Fi")) {
-                "${packet.sourceNodeName} (Wi-Fi)"
-            } else {
-                packet.sourceNodeName
-            }
-            if (existing != null) {
-                val updated = existing.copy(
+            val hopsCount = packet.hopCount + 1
+            val isDirectPeer = (hopsCount == 1)
+
+            if (isDirectPeer) {
+                peerSessionKeys[incomingEndpointId] = sharedKey
+                val existing = _connectedPeers.value[incomingEndpointId]
+                val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "")
+                val displayName = if (incomingEndpointId.startsWith("lan-")) {
+                    "$cleanName (Wi-Fi)"
+                } else {
+                    cleanName
+                }
+                val updated = PeerNode(
+                    endpointId = incomingEndpointId,
                     nodeId = packet.sourceNodeId,
                     nodeName = displayName,
                     publicKeyBase64 = peerPubKeyBase64,
-                    fingerprint = packet.extraMeta ?: CryptoManager.computeFingerprint(sharedKey.encoded)
+                    fingerprint = packet.extraMeta ?: CryptoManager.computeFingerprint(sharedKey.encoded),
+                    isConnected = true,
+                    isDirect = true,
+                    hops = 1,
+                    signalStrengthDbm = existing?.signalStrengthDbm ?: -45
                 )
-                _connectedPeers.value = _connectedPeers.value + (endpointId to updated)
+                _connectedPeers.value = _connectedPeers.value + (incomingEndpointId to updated)
+            } else {
+                // Multi-hop peer across another router, market, or relay phone!
+                val alreadyDirect = _connectedPeers.value.values.any { it.nodeId == packet.sourceNodeId && it.isDirect }
+                if (!alreadyDirect) {
+                    val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "")
+                    val multiHopPeer = PeerNode(
+                        endpointId = incomingEndpointId,
+                        nodeId = packet.sourceNodeId,
+                        nodeName = "$cleanName (عبر $hopsCount قفزات)",
+                        publicKeyBase64 = peerPubKeyBase64,
+                        fingerprint = packet.extraMeta ?: CryptoManager.computeFingerprint(sharedKey.encoded),
+                        isConnected = true,
+                        isDirect = false,
+                        hops = hopsCount,
+                        signalStrengthDbm = -65
+                    )
+                    _connectedPeers.value = _connectedPeers.value + (packet.sourceNodeId to multiHopPeer)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Key exchange err: ${e.message}")
@@ -655,8 +821,11 @@ class NearbyConnectionsManager(private val context: Context) {
             relayedBy = packet.relayedBy + localNodeName
         )
         val packetBytes = relayedPacket.toByteArray()
-        _connectedPeers.value.forEach { (endpointId, peer) ->
-            if (endpointId != arrivedFromEndpoint && !packet.relayedBy.contains(peer.nodeName)) {
+
+        // Send once to each distinct physical endpoint (except the one it arrived from)
+        val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
+        for (endpointId in distinctEndpoints) {
+            if (endpointId != arrivedFromEndpoint) {
                 sendDirectPayload(endpointId, packetBytes)
             }
         }
@@ -668,7 +837,7 @@ class NearbyConnectionsManager(private val context: Context) {
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
             destinationNodeId = receivedPacket.sourceNodeId,
-            ttl = 5,
+            ttl = DEFAULT_MESH_TTL,
             packetType = PacketType.DELIVERY_ACK,
             payloadCiphertext = receivedPacket.packetId,
             extraMeta = "ACK"
@@ -677,19 +846,24 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // Public Sending APIs (Hybrid Wi-Fi LAN + Nearby)
+    // Public Sending APIs (Hybrid Multi-Network LAN + Nearby Mesh)
     // -------------------------------------------------------------------------
 
     fun sendMeshPacket(packet: MeshPacket) {
         markPacketSeen(packet.packetId)
-        val bytes = packet.toByteArray()
-        val directPeer = _connectedPeers.value.values.find {
-            it.nodeId == packet.destinationNodeId || it.endpointId == packet.destinationNodeId
+        val elevatedPacket = if (packet.ttl in 1..5) packet.copy(ttl = DEFAULT_MESH_TTL) else packet
+        val bytes = elevatedPacket.toByteArray()
+
+        val targetNode = _connectedPeers.value.values.find {
+            it.nodeId == elevatedPacket.destinationNodeId || it.endpointId == elevatedPacket.destinationNodeId
         }
-        if (directPeer != null && !packet.isBroadcast) {
-            sendDirectPayload(directPeer.endpointId, bytes)
+        val routedEndpoint = targetNode?.endpointId ?: nextHopRoutes[elevatedPacket.destinationNodeId]
+
+        if (routedEndpoint != null && !elevatedPacket.isBroadcast) {
+            sendDirectPayload(routedEndpoint, bytes)
         } else {
-            _connectedPeers.value.keys.forEach { endpointId ->
+            val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
+            for (endpointId in distinctEndpoints) {
                 sendDirectPayload(endpointId, bytes)
             }
         }
@@ -741,7 +915,8 @@ class NearbyConnectionsManager(private val context: Context) {
         System.arraycopy(header, 0, packet, 0, header.size)
         System.arraycopy(safeFrame, 0, packet, header.size, safeFrame.size)
 
-        _connectedPeers.value.keys.forEach { endpointId ->
+        val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
+        for (endpointId in distinctEndpoints) {
             sendDirectPayload(endpointId, packet)
         }
     }
@@ -752,13 +927,15 @@ class NearbyConnectionsManager(private val context: Context) {
         System.arraycopy(header, 0, packet, 0, header.size)
         System.arraycopy(audioBytes, 0, packet, header.size, audioBytes.size)
 
-        _connectedPeers.value.keys.forEach { endpointId ->
+        val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
+        for (endpointId in distinctEndpoints) {
             sendDirectPayload(endpointId, packet)
         }
     }
 
     fun sendFile(targetEndpointId: String, file: File, header: MediaHeader) {
-        val lanOut = lanOutputs[targetEndpointId]
+        val resolvedEndpoint = nextHopRoutes[targetEndpointId] ?: targetEndpointId
+        val lanOut = lanOutputs[resolvedEndpoint]
         if (lanOut != null) {
             scope.launch {
                 try {
@@ -791,14 +968,14 @@ class NearbyConnectionsManager(private val context: Context) {
             val headerPacket = MeshPacket(
                 sourceNodeId = localNodeId,
                 sourceNodeName = localNodeName,
-                destinationNodeId = targetEndpointId,
+                destinationNodeId = resolvedEndpoint,
                 ttl = 1,
                 packetType = PacketType.MEDIA_HEADER,
                 payloadCiphertext = updatedHeader.toJson(),
                 extraMeta = updatedHeader.toJson()
             )
-            sendDirectPayload(targetEndpointId, headerPacket.toByteArray())
-            connectionsClient.sendPayload(targetEndpointId, filePayload)
+            sendDirectPayload(resolvedEndpoint, headerPacket.toByteArray())
+            connectionsClient.sendPayload(resolvedEndpoint, filePayload)
         } catch (e: Exception) {
             Log.e(TAG, "Nearby file send err: ${e.message}")
         }

@@ -85,7 +85,6 @@ class CipherMeshRepository(
         )
     }
 
-    // Smart Store-and-Forward Outbox Queue (messageId -> Pair(PlainText, MeshPacket))
     private val pendingOutbox by lazy {
         Collections.synchronizedMap(mutableMapOf("init" to Pair("", dummyPacket)).apply { clear() })
     }
@@ -135,7 +134,6 @@ class CipherMeshRepository(
             }
         }
 
-        // Smart Sync: Flush queued messages as soon as a peer connects
         scope.launch {
             nearbyManager.connectedPeers.collect { peers ->
                 if (peers.isNotEmpty()) {
@@ -145,7 +143,6 @@ class CipherMeshRepository(
             }
         }
 
-        // Periodic background sync for multi-hop store-and-forward delivery
         scope.launch {
             while (isActive) {
                 delay(6000)
@@ -175,10 +172,6 @@ class CipherMeshRepository(
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Persistent Local Database (Conversations & Smart Outbox)
-    // -------------------------------------------------------------------------
-
     private fun saveConversationsToDisk() {
         scope.launch {
             synchronized(dbLock) {
@@ -194,7 +187,7 @@ class CipherMeshRepository(
                             obj.put("senderName", msg.senderName)
                             obj.put("recipientId", msg.recipientId)
                             obj.put("text", msg.text)
-                            obj.put("mediaType", msg.mediaType.name)
+                            obj.put("mediaType", msg.mediaType?.name ?: "")
                             obj.put("mediaUri", msg.mediaUri ?: "")
                             obj.put("fileName", msg.fileName ?: "")
                             obj.put("fileSizeBytes", msg.fileSizeBytes)
@@ -231,6 +224,7 @@ class CipherMeshRepository(
                 val root = JSONObject(content)
                 var loadedMap = mapOf("*" to listOf(welcomeMessage)).minus("*")
                 val keys = root.keys()
+                val defaultMediaType = welcomeMessage.mediaType
 
                 while (keys.hasNext()) {
                     val peerKey = keys.next()
@@ -239,11 +233,11 @@ class CipherMeshRepository(
 
                     for (i in 0 until arr.length()) {
                         val obj = arr.optJSONObject(i) ?: continue
-                        val mediaTypeStr = obj.optString("mediaType", MediaType.NONE.name)
+                        val mediaTypeStr = obj.optString("mediaType", "")
                         val mediaType = try {
-                            MediaType.valueOf(mediaTypeStr)
+                            if (mediaTypeStr.isNotEmpty()) MediaType.valueOf(mediaTypeStr) else defaultMediaType
                         } catch (e: Exception) {
-                            MediaType.NONE
+                            defaultMediaType
                         }
 
                         val statusStr = obj.optString("status", MessageStatus.SENT.name)
@@ -406,10 +400,6 @@ class CipherMeshRepository(
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Incoming Packets & Media Handling
-    // -------------------------------------------------------------------------
-
     private fun handleIncomingPacket(packet: MeshPacket) {
         when (packet.packetType) {
             PacketType.TEXT_MESSAGE -> {
@@ -555,10 +545,6 @@ class CipherMeshRepository(
             nearbyManager.sendMeshPacket(packet)
         }
     }
-
-    // -------------------------------------------------------------------------
-    // Voice Notes & Media Attachments
-    // -------------------------------------------------------------------------
 
     fun startVoiceNoteRecording() {
         try {

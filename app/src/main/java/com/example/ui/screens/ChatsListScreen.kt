@@ -23,8 +23,6 @@ import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -66,8 +64,35 @@ fun ChatsListScreen(
     val connectedPeers by viewModel.connectedPeers.collectAsState()
     val verifiedPeers by viewModel.verifiedPeers.collectAsState()
 
-    // Build chat list entries: always include Broadcast Mesh Room ("*"), plus any active conversations or connected peers
-    val chatEntries = rememberChatEntries(conversations, connectedPeers.values.toList())
+    val broadcastMsgs = conversations["*"] ?: emptyList()
+    val broadcastEntry = ChatItemEntry(
+        peerId = "*",
+        title = "البث العام للشبكة",
+        subtitle = "قناة بث جماعي لكافة الأجهزة المتصلة",
+        lastMessage = broadcastMsgs.lastOrNull(),
+        isBroadcast = true,
+        isDirect = false
+    )
+
+    val chatEntries = mutableListOf(broadcastEntry)
+    val peerList = connectedPeers.values.toList()
+    val peerIds = (conversations.keys.filter { it != "*" } + peerList.map { it.nodeId }).distinct()
+
+    peerIds.forEach { peerId ->
+        val peer = peerList.find { it.nodeId == peerId }
+        val msgs = conversations[peerId] ?: emptyList()
+        val title = peer?.nodeName ?: "جهاز-${peerId.take(4)}"
+        chatEntries.add(
+            ChatItemEntry(
+                peerId = peerId,
+                title = title,
+                subtitle = if (peer != null) "اتصال مباشر • قفزة واحدة" else "متصل عبر الشبكة",
+                lastMessage = msgs.lastOrNull(),
+                isBroadcast = false,
+                isDirect = peer != null
+            )
+        )
+    }
 
     Box(
         modifier = modifier
@@ -86,13 +111,13 @@ fun ChatsListScreen(
             ) {
                 Column {
                     Text(
-                        text = "Encrypted Mesh Chats",
+                        text = "المحادثات المشفرة",
                         style = MaterialTheme.typography.titleLarge,
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Zero-Internet • E2EE AES-256-GCM",
+                        text = "بدون إنترنت • تشفير تام AES-256-GCM",
                         fontSize = 11.sp,
                         color = EmeraldSecure,
                         fontWeight = FontWeight.SemiBold
@@ -106,7 +131,7 @@ fun ChatsListScreen(
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = "${connectedPeers.size} active nodes",
+                        text = "${connectedPeers.size} متصل حالياً",
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
                         color = CyanPrimary
@@ -130,7 +155,6 @@ fun ChatsListScreen(
             }
         }
 
-        // Floating Action Button to open Radar / Scanner
         FloatingActionButton(
             onClick = { viewModel.navigateTo(AppScreen.RADAR) },
             containerColor = CyanPrimary,
@@ -142,7 +166,7 @@ fun ChatsListScreen(
         ) {
             Icon(
                 imageVector = Icons.Default.Radar,
-                contentDescription = "Open Radar"
+                contentDescription = "فتح الرادار"
             )
         }
     }
@@ -156,47 +180,6 @@ data class ChatItemEntry(
     val isBroadcast: Boolean,
     val isDirect: Boolean
 )
-
-@Composable
-private fun rememberChatEntries(
-    conversations: Map<String, List<ChatMessage>>,
-    connectedPeers: List<com.example.mesh.PeerNode>
-): List<ChatItemEntry> {
-    val list = mutableListOf<ChatItemEntry>()
-
-    // Broadcast room
-    val broadcastMsgs = conversations["*"] ?: emptyList()
-    list.add(
-        ChatItemEntry(
-            peerId = "*",
-            title = "Global Mesh Broadcast",
-            subtitle = "Multi-hop ad-hoc cluster channel",
-            lastMessage = broadcastMsgs.lastOrNull(),
-            isBroadcast = true,
-            isDirect = false
-        )
-    )
-
-    // Add direct connected peers or conversations
-    val peerIds = (conversations.keys.filter { it != "*" } + connectedPeers.map { it.nodeId }).distinct()
-    peerIds.forEach { peerId ->
-        val peer = connectedPeers.find { it.nodeId == peerId }
-        val msgs = conversations[peerId] ?: emptyList()
-        val title = peer?.nodeName ?: "Node-${peerId.take(4)}"
-        list.add(
-            ChatItemEntry(
-                peerId = peerId,
-                title = title,
-                subtitle = if (peer != null) "Direct link • 1-hop" else "Multi-hop mesh peer",
-                lastMessage = msgs.lastOrNull(),
-                isBroadcast = false,
-                isDirect = peer != null
-            )
-        )
-    }
-
-    return list
-}
 
 @Composable
 private fun ChatListItemCard(
@@ -257,7 +240,7 @@ private fun ChatListItemCard(
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
+                                contentDescription = "موثوق",
                                 tint = EmeraldSecure,
                                 modifier = Modifier.size(14.dp)
                             )
@@ -265,7 +248,7 @@ private fun ChatListItemCard(
                     }
 
                     entry.lastMessage?.let { msg ->
-                        val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(msg.timestamp))
+                        val timeStr = SimpleDateFormat("hh:mm a", Locale("ar")).format(Date(msg.timestamp))
                         Text(
                             text = timeStr,
                             fontSize = 11.sp,
@@ -284,8 +267,8 @@ private fun ChatListItemCard(
                 ) {
                     val previewText = when {
                         entry.lastMessage == null -> entry.subtitle
-                        entry.lastMessage.mediaType == MediaType.AUDIO_NOTE -> "🎙️ Voice Note"
-                        entry.lastMessage.mediaType == MediaType.IMAGE -> "📷 Image attachment"
+                        entry.lastMessage.mediaType == MediaType.AUDIO_NOTE -> "🎙️ رسالة صوتية"
+                        entry.lastMessage.mediaType == MediaType.IMAGE -> "📷 صورة مرفقة"
                         else -> entry.lastMessage.text
                     }
 

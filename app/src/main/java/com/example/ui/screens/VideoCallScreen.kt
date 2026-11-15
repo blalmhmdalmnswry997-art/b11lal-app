@@ -81,7 +81,6 @@ fun VideoCallScreen(
 
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Bind CameraX on launch if call is active
     LaunchedEffect(callState) {
         if (callState == CallState.CONNECTED || callState == CallState.OUTGOING_RINGING) {
             viewModel.webRtcManager.bindCameraCapture(lifecycleOwner)
@@ -97,16 +96,14 @@ fun VideoCallScreen(
             .fillMaxSize()
             .background(Color(0xFF040810))
     ) {
-        // Main Video Stream: Remote Stream or Audio Call Graphic
         if (remoteBitmap != null && !isVideoMuted && callType == CallType.VIDEO) {
             Image(
                 bitmap = remoteBitmap!!.asImageBitmap(),
-                contentDescription = "Remote Video Stream",
+                contentDescription = "بث الفيديو البعيد",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
         } else {
-            // Placeholder / Audio Call Interface
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -139,14 +136,14 @@ fun VideoCallScreen(
                     fontWeight = FontWeight.Bold
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier.height(6.dp))
 
                 Text(
                     text = when (callState) {
-                        CallState.OUTGOING_RINGING -> "Calling via Direct Wi-Fi Direct socket..."
-                        CallState.INCOMING_RINGING -> "Incoming Offline Encrypted Call..."
-                        CallState.CONNECTED -> "Direct P2P Encrypted Call Active"
-                        else -> "Call Terminated"
+                        CallState.OUTGOING_RINGING -> "جاري الاتصال عبر شبكة الواي فاي المباشرة..."
+                        CallState.INCOMING_RINGING -> "مكالمة مشفرة واردة..."
+                        CallState.CONNECTED -> "مكالمة مباشرة مشفرة نشطة"
+                        else -> "تم إنهاء المكالمة"
                     },
                     fontSize = 13.sp,
                     color = if (callState == CallState.CONNECTED) EmeraldSecure else AmberMesh,
@@ -155,7 +152,6 @@ fun VideoCallScreen(
             }
         }
 
-        // Floating Local PIP Camera Preview
         if (localBitmap != null && callType == CallType.VIDEO && !isVideoMuted) {
             Card(
                 modifier = Modifier
@@ -167,14 +163,13 @@ fun VideoCallScreen(
             ) {
                 Image(
                     bitmap = localBitmap!!.asImageBitmap(),
-                    contentDescription = "Local Camera Preview",
+                    contentDescription = "معاينة الكاميرا المحلية",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
             }
         }
 
-        // Top Telemetry HUD
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -196,7 +191,7 @@ fun VideoCallScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "AES-256-GCM ZERO-INTERNET",
+                    text = "تشفير AES-256 بدون إنترنت",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = EmeraldSecure,
@@ -216,13 +211,13 @@ fun VideoCallScreen(
                 ) {
                     Column {
                         Text(
-                            text = "FPS: $fps  •  BITRATE: ${bitrateKbps} kbps",
+                            text = "الإطارات: $fps  •  السرعة: ${bitrateKbps} كيلوبت/ثا",
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                             color = CyanPrimary
                         )
                         Text(
-                            text = "RTT: ${rttMs}ms (Direct Hotspot/Wi-Fi Socket)",
+                            text = "التأخير: ${rttMs} ملي ثانية (اتصال مباشر محلي)",
                             fontSize = 9.sp,
                             fontFamily = FontFamily.Monospace,
                             color = Color(0xFF8FA4C4)
@@ -232,7 +227,6 @@ fun VideoCallScreen(
             }
         }
 
-        // Incoming Call Action Dialog
         if (callState == CallState.INCOMING_RINGING) {
             Card(
                 modifier = Modifier
@@ -250,14 +244,14 @@ fun VideoCallScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "Incoming Call",
+                        text = "مكالمة واردة",
                         style = MaterialTheme.typography.titleMedium,
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "$peerName is calling you offline",
+                        text = "$peerName يتصل بك بدون إنترنت",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color(0xFF8FA4C4)
                     )
@@ -278,7 +272,7 @@ fun VideoCallScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.CallEnd,
-                                contentDescription = "Decline",
+                                contentDescription = "رفض",
                                 tint = Color.White,
                                 modifier = Modifier.size(28.dp)
                             )
@@ -294,7 +288,7 @@ fun VideoCallScreen(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Phone,
-                                contentDescription = "Accept",
+                                contentDescription = "قبول",
                                 tint = Color(0xFF00220F),
                                 modifier = Modifier.size(28.dp)
                             )
@@ -304,7 +298,6 @@ fun VideoCallScreen(
             }
         }
 
-        // Floating Bottom Controls Bar
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -321,7 +314,6 @@ fun VideoCallScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Mic Mute Toggle
                 IconButton(
                     onClick = { viewModel.webRtcManager.toggleMic() },
                     modifier = Modifier
@@ -332,12 +324,11 @@ fun VideoCallScreen(
                 ) {
                     Icon(
                         imageVector = if (isMicMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                        contentDescription = "Toggle Mic",
+                        contentDescription = "كتم الميكروفون",
                         tint = Color.White
                     )
                 }
 
-                // Video Toggle (if Video Call)
                 if (callType == CallType.VIDEO) {
                     IconButton(
                         onClick = { viewModel.webRtcManager.toggleVideo() },
@@ -349,12 +340,11 @@ fun VideoCallScreen(
                     ) {
                         Icon(
                             imageVector = if (isVideoMuted) Icons.Default.VideocamOff else Icons.Default.Videocam,
-                            contentDescription = "Toggle Video",
+                            contentDescription = "إيقاف الكاميرا",
                             tint = Color.White
                         )
                     }
 
-                    // Flip Camera
                     IconButton(
                         onClick = { viewModel.webRtcManager.toggleCamera(lifecycleOwner) },
                         modifier = Modifier
@@ -365,13 +355,12 @@ fun VideoCallScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Cameraswitch,
-                            contentDescription = "Flip Camera",
+                            contentDescription = "قلب الكاميرا",
                             tint = CyanPrimary
                         )
                     }
                 }
 
-                // Speaker Toggle
                 IconButton(
                     onClick = { viewModel.webRtcManager.toggleSpeaker() },
                     modifier = Modifier
@@ -382,12 +371,11 @@ fun VideoCallScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.VolumeUp,
-                        contentDescription = "Toggle Speaker",
+                        contentDescription = "مكبر الصوت",
                         tint = if (isSpeakerOn) Color(0xFF001F29) else Color.White
                     )
                 }
 
-                // End Call Button
                 IconButton(
                     onClick = { viewModel.endCall() },
                     modifier = Modifier
@@ -398,7 +386,7 @@ fun VideoCallScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.CallEnd,
-                        contentDescription = "End Call",
+                        contentDescription = "إنهاء المكالمة",
                         tint = Color.White,
                         modifier = Modifier.size(26.dp)
                     )

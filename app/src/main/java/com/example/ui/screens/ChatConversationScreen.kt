@@ -67,7 +67,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     val listState = rememberLazyListState()
 
     val currentPeer = connectedPeers.values.find { it.nodeId == selectedPeerId || it.endpointId == selectedPeerId }
-    val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "Global Mesh Broadcast" else "Peer-${selectedPeerId?.take(4)}"
+    val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "البث العام للشبكة" else "متصل-${selectedPeerId?.take(4)}"
     val isBroadcast = selectedPeerId == "*" || selectedPeerId == null
     val isVerified = selectedPeerId != null && verifiedPeers.contains(selectedPeerId)
 
@@ -94,7 +94,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { viewModel.navigateTo(AppScreen.CHATS) }, modifier = Modifier.testTag("back_button")) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = Color.White)
                 }
                 Spacer(Modifier.width(4.dp))
                 Box(
@@ -115,11 +115,11 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         Text(peerDisplayName, style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.Bold)
                         if (isVerified) {
                             Spacer(Modifier.width(4.dp))
-                            Icon(Icons.Default.CheckCircle, contentDescription = "Verified", tint = EmeraldSecure, modifier = Modifier.size(14.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = "موثوق", tint = EmeraldSecure, modifier = Modifier.size(14.dp))
                         }
                     }
                     Text(
-                        text = if (isBroadcast) "Multi-Hop Mesh Flooding" else if (currentPeer != null) "Direct Link • E2EE AES-256" else "Relayed via Mesh",
+                        text = if (isBroadcast) "بث شبكي متعدد القفزات" else if (currentPeer != null) "اتصال مباشر • مشفر AES-256" else "تم التوجيه عبر الشبكة",
                         fontSize = 11.sp,
                         color = if (isBroadcast) AmberMesh else EmeraldSecure
                     )
@@ -129,14 +129,14 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             if (!isBroadcast && selectedPeerId != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE) }, modifier = Modifier.testTag("voice_call_button")) {
-                        Icon(Icons.Default.Call, contentDescription = "Voice Call", tint = CyanPrimary)
+                        Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية", tint = CyanPrimary)
                     }
                     IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VIDEO) }, modifier = Modifier.testTag("video_call_button")) {
-                        Icon(Icons.Default.Videocam, contentDescription = "Video Call", tint = EmeraldSecure)
+                        Icon(Icons.Default.Videocam, contentDescription = "مكالمة فيديو", tint = EmeraldSecure)
                     }
                     currentPeer?.let { peer ->
                         IconButton(onClick = { viewModel.openVerificationDialog(peer) }, modifier = Modifier.testTag("verify_key_button")) {
-                            Icon(Icons.Default.Security, contentDescription = "Verify Key", tint = if (isVerified) EmeraldSecure else AmberMesh)
+                            Icon(Icons.Default.Security, contentDescription = "توثيق الأمان", tint = if (isVerified) EmeraldSecure else AmberMesh)
                         }
                     }
                 }
@@ -172,13 +172,13 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     onClick = { mediaPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
                     modifier = Modifier.testTag("attach_button")
                 ) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "Attach Media", tint = CyanPrimary)
+                    Icon(Icons.Default.AttachFile, contentDescription = "إرفاق ملف", tint = CyanPrimary)
                 }
 
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("Encrypted message...", color = Color(0xFF536B8D), fontSize = 13.sp) },
+                    placeholder = { Text("اكتب رسالة مشفرة...", color = Color(0xFF536B8D), fontSize = 13.sp) },
                     modifier = Modifier.weight(1f).testTag("message_input_field"),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -209,14 +209,14 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         },
                         modifier = Modifier.size(44.dp).clip(CircleShape).background(CyanPrimary).testTag("send_button")
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color(0xFF001F29), modifier = Modifier.size(20.dp))
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "إرسال", tint = Color(0xFF001F29), modifier = Modifier.size(20.dp))
                     }
                 } else {
                     IconButton(
                         onClick = { viewModel.startVoiceRecording() },
                         modifier = Modifier.size(44.dp).clip(CircleShape).background(EmeraldSecure).testTag("voice_record_button")
                     ) {
-                        Icon(Icons.Default.Mic, contentDescription = "Record Voice Note", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
+                        Icon(Icons.Default.Mic, contentDescription = "تسجيل صوتي", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
                     }
                 }
             }
@@ -240,8 +240,8 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
     val borderColor = if (message.isOutgoing) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1F355A)
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
-        if (message.hopCount > 0 || message.relayPath.isNotEmpty()) {
-            val hopText = if (message.relayPath.isNotEmpty()) "Relayed via: ${message.relayPath.joinToString(" -> ")}" else "Mesh Relayed (${message.hopCount} hops)"
+        if (message.hopCount in 1..Int.MAX_VALUE || message.relayPath.isNotEmpty()) {
+            val hopText = if (message.relayPath.isNotEmpty()) "مرسل عبر: ${message.relayPath.joinToString(" <- ")}" else "تم توجيهه (${message.hopCount} قفزات)"
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
                 Icon(Icons.Default.Hub, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(10.dp))
                 Spacer(Modifier.width(4.dp))
@@ -268,12 +268,12 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
                         if (file != null && file.exists()) {
                             AsyncImage(
                                 model = ImageRequest.Builder(LocalContext.current).data(file).crossfade(true).build(),
-                                contentDescription = "Received Photo",
+                                contentDescription = "صورة",
                                 modifier = Modifier.size(200.dp).clip(RoundedCornerShape(10.dp)),
                                 contentScale = ContentScale.Crop
                             )
                         } else {
-                            Text("📷 [Image: ${message.fileName}]", color = Color.White, fontSize = 13.sp)
+                            Text("📷 [صورة: ${message.fileName}]", color = Color.White, fontSize = 13.sp)
                         }
                     }
                     MediaType.AUDIO_NOTE -> VoiceNoteBubble(isPlaying = isPlaying, text = message.text, onPlayClick = onPlayVoiceNote)
@@ -283,7 +283,7 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
                 Spacer(Modifier.height(4.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End, modifier = Modifier.align(Alignment.End)) {
-                    val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp))
+                    val timeStr = SimpleDateFormat("hh:mm a", Locale("ar")).format(Date(message.timestamp))
                     Text(timeStr, fontSize = 10.sp, color = Color(0xFF8FA4C4), fontFamily = FontFamily.Monospace)
                     if (message.isOutgoing) {
                         Spacer(Modifier.width(4.dp))
@@ -312,7 +312,7 @@ private fun VoiceNoteBubble(isPlaying: Boolean, text: String, onPlayClick: () ->
         Spacer(Modifier.width(10.dp))
         Column {
             Text(text, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-            Text(if (isPlaying) "Playing voice note..." else "Tap to play", fontSize = 10.sp, color = EmeraldSecure)
+            Text(if (isPlaying) "جاري التشغيل..." else "اضغط للاستماع", fontSize = 10.sp, color = EmeraldSecure)
         }
     }
 }
@@ -327,14 +327,14 @@ private fun VoiceNoteRecordingBar(durationSec: Int, onCancel: () -> Unit, onSend
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(12.dp).clip(CircleShape).background(RedAlert))
             Spacer(Modifier.width(10.dp))
-            Text("Recording 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("جاري التسجيل 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             IconButton(onClick = onCancel, modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF162540))) {
-                Icon(Icons.Default.Close, contentDescription = "Cancel", tint = Color.LightGray, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Close, contentDescription = "إلغاء", tint = Color.LightGray, modifier = Modifier.size(18.dp))
             }
             IconButton(onClick = onSend, modifier = Modifier.size(38.dp).clip(CircleShape).background(EmeraldSecure)) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color(0xFF00220F), modifier = Modifier.size(18.dp))
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "إرسال", tint = Color(0xFF00220F), modifier = Modifier.size(18.dp))
             }
         }
     }

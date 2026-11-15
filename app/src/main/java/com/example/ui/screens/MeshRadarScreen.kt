@@ -9,10 +9,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,11 +28,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Radar
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
@@ -40,12 +39,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -63,12 +60,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.mesh.PeerNode
-import com.example.ui.AppScreen
 import com.example.ui.MainViewModel
-import com.example.ui.components.MeshDiagnosticsDialog
 import com.example.ui.components.SecurityVerificationDialog
 import com.example.ui.theme.AmberMesh
 import com.example.ui.theme.CyanPrimary
@@ -94,7 +91,6 @@ fun MeshRadarScreen(
 
     var showDiagnostics by remember { mutableStateOf(false) }
 
-    // Combine discovered and connected peers for radar plotting
     val allPeers = remember(discoveredPeers, connectedPeers) {
         val map = discoveredPeers.toMutableMap()
         connectedPeers.forEach { (k, v) -> map[k] = v }
@@ -107,7 +103,6 @@ fun MeshRadarScreen(
             .background(Color(0xFF070D18))
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        // Top Tactical Status Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -123,11 +118,10 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "100% OFFLINE P2P MESH",
+                        text = "شبكة اتصال مباشر 100% بدون إنترنت",
                         style = MaterialTheme.typography.labelSmall,
                         color = EmeraldSecure,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
+                        fontWeight = FontWeight.Bold
                     )
                 }
                 Text(
@@ -148,7 +142,7 @@ fun MeshRadarScreen(
                 ) {
                     Icon(
                         imageVector = if (isGraphView) Icons.Default.Radar else Icons.Default.Hub,
-                        contentDescription = "Toggle Topology View",
+                        contentDescription = "تبديل عرض الشبكة",
                         tint = CyanPrimary
                     )
                 }
@@ -164,7 +158,7 @@ fun MeshRadarScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Security,
-                        contentDescription = "Diagnostics",
+                        contentDescription = "تشخيص الشبكة",
                         tint = AmberMesh
                     )
                 }
@@ -173,25 +167,24 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Mesh Status Metrics Chips
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             StatusChip(
-                label = "DIRECT PEERS",
+                label = "متصل مباشر",
                 value = "${connectedPeers.size}",
                 color = CyanPrimary,
                 modifier = Modifier.weight(1f)
             )
             StatusChip(
-                label = "DISCOVERED",
+                label = "الأجهزة المكتشفة",
                 value = "${discoveredPeers.size}",
                 color = AmberMesh,
                 modifier = Modifier.weight(1f)
             )
             StatusChip(
-                label = "FORWARDED",
+                label = "الحزم الموجهة",
                 value = "$packetsForwarded",
                 color = EmeraldSecure,
                 modifier = Modifier.weight(1f)
@@ -200,7 +193,6 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Center Visual Area: Animated Tactical Radar or Topology Mesh Graph
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -211,22 +203,164 @@ fun MeshRadarScreen(
             contentAlignment = Alignment.Center
         ) {
             if (isGraphView) {
-                TopologyGraphCanvas(
-                    localNodeName = viewModel.repository.localNodeName,
-                    peers = allPeers
+                val pulseTransition = rememberInfiniteTransition(label = "pulse")
+                val pulseProgress by pulseTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(2000, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "pulseProgress"
                 )
+
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val radius = minOf(size.width, size.height) / 2.5f
+
+                    drawCircle(
+                        color = EmeraldSecure,
+                        radius = 8.dp.toPx(),
+                        center = center
+                    )
+
+                    allPeers.forEachIndexed { index, peer ->
+                        val angle = (index * (360f / maxOf(allPeers.size, 1))) % 360f
+                        val rad = Math.toRadians(angle.toDouble())
+                        val peerPos = Offset(
+                            (center.x + radius * cos(rad)).toFloat(),
+                            (center.y + radius * sin(rad)).toFloat()
+                        )
+
+                        val linkColor = if (peer.isConnected) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1B2F4E)
+                        drawLine(
+                            color = linkColor,
+                            start = center,
+                            end = peerPos,
+                            strokeWidth = 2f
+                        )
+
+                        if (peer.isConnected) {
+                            val pulsePos = Offset(
+                                center.x + (peerPos.x - center.x) * pulseProgress,
+                                center.y + (peerPos.y - center.y) * pulseProgress
+                            )
+                            drawCircle(
+                                color = CyanPrimary,
+                                radius = 3.dp.toPx(),
+                                center = pulsePos
+                            )
+                        }
+
+                        val peerColor = if (peer.isConnected) CyanPrimary else AmberMesh
+                        drawCircle(
+                            color = peerColor,
+                            radius = 7.dp.toPx(),
+                            center = peerPos
+                        )
+                    }
+                }
             } else {
-                TacticalRadarCanvas(peers = allPeers)
+                val radarTransition = rememberInfiniteTransition(label = "radarSweep")
+                val sweepAngle by radarTransition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(4000, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    ),
+                    label = "sweepAngle"
+                )
+
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val radius = minOf(size.width, size.height) / 2.2f
+                    val gridColor = Color(0xFF1B2F4E)
+
+                    for (i in 1..4) {
+                        val r = radius * (i / 4f)
+                        drawCircle(
+                            color = gridColor,
+                            radius = r,
+                            center = center,
+                            style = Stroke(width = 1f)
+                        )
+                    }
+
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(center.x - radius, center.y),
+                        end = Offset(center.x + radius, center.y),
+                        strokeWidth = 1f
+                    )
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(center.x, center.y - radius),
+                        end = Offset(center.x, center.y + radius),
+                        strokeWidth = 1f
+                    )
+
+                    val rad = Math.toRadians(sweepAngle.toDouble())
+                    val sweepEnd = Offset(
+                        (center.x + radius * cos(rad)).toFloat(),
+                        (center.y + radius * sin(rad)).toFloat()
+                    )
+
+                    drawLine(
+                        brush = Brush.linearGradient(
+                            colors = listOf(CyanPrimary.copy(alpha = 0.8f), Color.Transparent),
+                            start = center,
+                            end = sweepEnd
+                        ),
+                        start = center,
+                        end = sweepEnd,
+                        strokeWidth = 2f
+                    )
+
+                    drawCircle(
+                        color = EmeraldSecure,
+                        radius = 6.dp.toPx(),
+                        center = center
+                    )
+                    drawCircle(
+                        color = EmeraldSecure.copy(alpha = 0.3f),
+                        radius = 12.dp.toPx(),
+                        center = center,
+                        style = Stroke(width = 2f)
+                    )
+
+                    allPeers.forEachIndexed { index, peer ->
+                        val peerAngle = (index * (360f / maxOf(allPeers.size, 1)) + 45f) % 360f
+                        val peerRad = Math.toRadians(peerAngle.toDouble())
+                        val dist = radius * (0.45f + ((index % 3) * 0.2f))
+                        val peerPos = Offset(
+                            (center.x + dist * cos(peerRad)).toFloat(),
+                            (center.y + dist * sin(peerRad)).toFloat()
+                        )
+
+                        val blipColor = if (peer.isConnected) CyanPrimary else AmberMesh
+                        drawCircle(
+                            color = blipColor,
+                            radius = 5.dp.toPx(),
+                            center = peerPos
+                        )
+                        drawCircle(
+                            color = blipColor.copy(alpha = 0.4f),
+                            radius = 10.dp.toPx(),
+                            center = peerPos,
+                            style = Stroke(width = 1.5f)
+                        )
+                    }
+                }
             }
 
-            // Radar overlay HUD
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(12.dp)
             ) {
                 Text(
-                    text = if (isGraphView) "TOPOLOGY GRAPH: P2P_CLUSTER" else "BLE & WI-FI DIRECT RADAR",
+                    text = if (isGraphView) "مخطط الشبكة: عنقودي مباشر" else "رادار البلوتوث والواي فاي المحلي",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFF536B8D),
@@ -234,7 +368,7 @@ fun MeshRadarScreen(
                 )
 
                 Text(
-                    text = "AES-256-GCM ACTIVE",
+                    text = "تشفير AES-256 نشط",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = EmeraldSecure,
@@ -245,23 +379,21 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Section Title: Discovered & Connected Nodes
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "NEIGHBORHOOD NODES (${allPeers.size})",
+                text = "الأجهزة القريبة (${allPeers.size})",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF8FA4C4),
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.sp
+                fontWeight = FontWeight.Bold
             )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = if (isAdvertising && isDiscovering) "Auto-Mesh Active" else "Mesh Paused",
+                    text = if (isAdvertising && isDiscovering) "الربط التلقائي نشط" else "الشبكة متوقفة",
                     fontSize = 11.sp,
                     color = if (isAdvertising && isDiscovering) EmeraldSecure else Color.Gray
                 )
@@ -278,11 +410,11 @@ fun MeshRadarScreen(
                         containerColor = if (isAdvertising) Color(0xFF162540) else CyanPrimary
                     ),
                     shape = RoundedCornerShape(8.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                     modifier = Modifier.height(28.dp)
                 ) {
                     Text(
-                        text = if (isAdvertising) "Stop" else "Start Scan",
+                        text = if (isAdvertising) "إيقاف" else "بدء البحث",
                         fontSize = 11.sp,
                         color = if (isAdvertising) Color.White else Color(0xFF001F29),
                         fontWeight = FontWeight.Bold
@@ -293,7 +425,6 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Peer Node Cards List
         if (allPeers.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -313,17 +444,17 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Scanning for nearby devices...",
+                        text = "جاري البحث عن الأجهزة القريبة...",
                         color = Color(0xFF8FA4C4),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Make sure other phones have CipherMesh open. No Wi-Fi router or cellular needed.",
+                        text = "تأكد من فتح التطبيق في الأجهزة الأخرى. يعمل عبر البلوتوث أو الواي فاي المحلي بدون إنترنت.",
                         color = Color(0xFF536B8D),
                         fontSize = 11.sp,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        textAlign = TextAlign.Center
                     )
                 }
             }
@@ -348,25 +479,173 @@ fun MeshRadarScreen(
         }
     }
 
-    // Diagnostics Dialog
     if (showDiagnostics) {
-        MeshDiagnosticsDialog(
-            localNodeId = viewModel.repository.localNodeId,
-            localNodeName = viewModel.repository.localNodeName,
-            connectedPeers = connectedPeers,
-            packetsForwarded = packetsForwarded,
-            packetsReceived = packetsReceived,
-            onDismiss = { showDiagnostics = false }
-        )
+        Dialog(onDismissRequest = { showDiagnostics = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1B2F4E))
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(AmberMesh.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Hub,
+                                    contentDescription = null,
+                                    tint = AmberMesh,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "محرك الشبكة المحلية",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        IconButton(onClick = { showDiagnostics = false }) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "إغلاق",
+                                tint = Color.Gray
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(EmeraldSecure.copy(alpha = 0.12f))
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WifiOff,
+                            contentDescription = null,
+                            tint = EmeraldSecure,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "لا يتطلب إنترنت: وضع الاتصال المباشر والواي فاي المحلي نشط",
+                            fontSize = 12.sp,
+                            color = EmeraldSecure,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF070D18))
+                            .border(1.dp, Color(0xFF162540), RoundedCornerShape(12.dp))
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        DiagnosticRow("الجهاز المحلي", "${viewModel.repository.localNodeName} (${viewModel.repository.localNodeId})")
+                        DiagnosticRow("نمط الشبكة", "ربط عنقودي مباشر P2P")
+                        DiagnosticRow("طبقة النقل", "بلوتوث + واي فاي مباشر ومحلي")
+                        DiagnosticRow("خوارزمية التشفير", "AES-256-GCM / X25519")
+                        DiagnosticRow("الحزم الموجهة", "$packetsForwarded حزمة معاد توجيهها")
+                        DiagnosticRow("الحزم المستلمة", "$packetsReceived حزمة تمت معالجتها")
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text(
+                        text = "جدول التوجيه النشط",
+                        fontSize = 11.sp,
+                        color = CyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    if (connectedPeers.isEmpty()) {
+                        Text(
+                            text = "لا توجد أجهزة متصلة حالياً",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    } else {
+                        connectedPeers.values.forEach { peer ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xFF0F1A2E))
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(EmeraldSecure)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "${peer.nodeName} • اتصال مباشر (قفزة 1)",
+                                    fontSize = 12.sp,
+                                    color = CyanPrimary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // Key Verification Dialog
     peerToVerify?.let { peer ->
         SecurityVerificationDialog(
             peer = peer,
             isVerified = verifiedPeers.contains(peer.nodeId),
             onVerifyClick = { viewModel.markPeerVerified(peer.nodeId) },
             onDismiss = { viewModel.closeVerificationDialog() }
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = Color(0xFF8FA4C4)
+        )
+        Text(
+            text = value,
+            fontSize = 11.sp,
+            color = Color.White,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold
         )
     }
 }
@@ -459,7 +738,7 @@ private fun PeerNodeCard(
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
+                                contentDescription = "موثوق",
                                 tint = EmeraldSecure,
                                 modifier = Modifier.size(14.dp)
                             )
@@ -471,7 +750,7 @@ private fun PeerNodeCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (peer.isConnected) "Connected (1-hop direct)" else "Discovered",
+                            text = if (peer.isConnected) "متصل الآن (ارتباط مباشر)" else "متاح للاتصال",
                             fontSize = 11.sp,
                             color = if (peer.isConnected) EmeraldSecure else Color(0xFF8FA4C4)
                         )
@@ -498,7 +777,7 @@ private fun PeerNodeCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Security,
-                            contentDescription = "Verify Key",
+                            contentDescription = "توثيق المفتاح",
                             tint = if (isVerified) EmeraldSecure else AmberMesh,
                             modifier = Modifier.size(18.dp)
                         )
@@ -508,7 +787,7 @@ private fun PeerNodeCard(
                         onClick = onChatClick,
                         colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary),
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                         modifier = Modifier.height(34.dp)
                     ) {
                         Icon(
@@ -519,7 +798,7 @@ private fun PeerNodeCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Chat",
+                            text = "محادثة",
                             fontSize = 12.sp,
                             color = Color(0xFF001F29),
                             fontWeight = FontWeight.Bold
@@ -529,12 +808,12 @@ private fun PeerNodeCard(
                     OutlinedButton(
                         onClick = onConnectClick,
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                         modifier = Modifier.height(34.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, CyanPrimary)
                     ) {
                         Text(
-                            text = "Connect",
+                            text = "اتصال",
                             fontSize = 12.sp,
                             color = CyanPrimary,
                             fontWeight = FontWeight.SemiBold
@@ -542,180 +821,6 @@ private fun PeerNodeCard(
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * Animated Tactical Sonar Radar Canvas.
- */
-@Composable
-private fun TacticalRadarCanvas(peers: List<PeerNode>) {
-    val transition = rememberInfiniteTransition(label = "radarSweep")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "sweepAngle"
-    )
-
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = minOf(size.width, size.height) / 2.2f
-
-        // Draw concentric range circles
-        val gridColor = Color(0xFF1B2F4E)
-        for (i in 1..4) {
-            val r = radius * (i / 4f)
-            drawCircle(
-                color = gridColor,
-                radius = r,
-                center = center,
-                style = Stroke(width = 1f)
-            )
-        }
-
-        // Draw crosshair axes
-        drawLine(
-            color = gridColor,
-            start = Offset(center.x - radius, center.y),
-            end = Offset(center.x + radius, center.y),
-            strokeWidth = 1f
-        )
-        drawLine(
-            color = gridColor,
-            start = Offset(center.x, center.y - radius),
-            end = Offset(center.x, center.y + radius),
-            strokeWidth = 1f
-        )
-
-        // Draw sweep line with glowing gradient
-        val rad = Math.toRadians(angle.toDouble())
-        val sweepEnd = Offset(
-            (center.x + radius * cos(rad)).toFloat(),
-            (center.y + radius * sin(rad)).toFloat()
-        )
-
-        drawLine(
-            brush = Brush.linearGradient(
-                colors = listOf(CyanPrimary.copy(alpha = 0.8f), Color.Transparent),
-                start = center,
-                end = sweepEnd
-            ),
-            start = center,
-            end = sweepEnd,
-            strokeWidth = 2f
-        )
-
-        // Center dot: Local Node
-        drawCircle(
-            color = EmeraldSecure,
-            radius = 6.dp.toPx(),
-            center = center
-        )
-        drawCircle(
-            color = EmeraldSecure.copy(alpha = 0.3f),
-            radius = 12.dp.toPx(),
-            center = center,
-            style = Stroke(width = 2f)
-        )
-
-        // Plot Peer Blips around center
-        peers.forEachIndexed { index, peer ->
-            val peerAngle = (index * (360f / maxOf(peers.size, 1)) + 45f) % 360f
-            val peerRad = Math.toRadians(peerAngle.toDouble())
-            val dist = radius * (0.45f + ((index % 3) * 0.2f))
-            val peerPos = Offset(
-                (center.x + dist * cos(peerRad)).toFloat(),
-                (center.y + dist * sin(peerRad)).toFloat()
-            )
-
-            val blipColor = if (peer.isConnected) CyanPrimary else AmberMesh
-            drawCircle(
-                color = blipColor,
-                radius = 5.dp.toPx(),
-                center = peerPos
-            )
-            drawCircle(
-                color = blipColor.copy(alpha = 0.4f),
-                radius = 10.dp.toPx(),
-                center = peerPos,
-                style = Stroke(width = 1.5f)
-            )
-        }
-    }
-}
-
-/**
- * Animated Topology Graph Canvas showing mesh links and packet pulses.
- */
-@Composable
-private fun TopologyGraphCanvas(
-    localNodeName: String,
-    peers: List<PeerNode>
-) {
-    val transition = rememberInfiniteTransition(label = "pulse")
-    val pulseProgress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "pulseProgress"
-    )
-
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = minOf(size.width, size.height) / 2.5f
-
-        // Draw local hub center
-        drawCircle(
-            color = EmeraldSecure,
-            radius = 8.dp.toPx(),
-            center = center
-        )
-
-        peers.forEachIndexed { index, peer ->
-            val angle = (index * (360f / maxOf(peers.size, 1))) % 360f
-            val rad = Math.toRadians(angle.toDouble())
-            val peerPos = Offset(
-                (center.x + radius * cos(rad)).toFloat(),
-                (center.y + radius * sin(rad)).toFloat()
-            )
-
-            // Draw link line between local node and peer
-            val linkColor = if (peer.isConnected) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1B2F4E)
-            drawLine(
-                color = linkColor,
-                start = center,
-                end = peerPos,
-                strokeWidth = 2f
-            )
-
-            // Draw animated packet pulse dot along link line
-            if (peer.isConnected) {
-                val pulsePos = Offset(
-                    center.x + (peerPos.x - center.x) * pulseProgress,
-                    center.y + (peerPos.y - center.y) * pulseProgress
-                )
-                drawCircle(
-                    color = CyanPrimary,
-                    radius = 3.dp.toPx(),
-                    center = pulsePos
-                )
-            }
-
-            // Draw peer node circle
-            val peerColor = if (peer.isConnected) CyanPrimary else AmberMesh
-            drawCircle(
-                color = peerColor,
-                radius = 7.dp.toPx(),
-                center = peerPos
-            )
         }
     }
 }

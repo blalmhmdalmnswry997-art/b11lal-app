@@ -53,7 +53,11 @@ class CipherMeshRepository(
     private val nullString: String? = null
 
     val localNodeId: String
-    val localNodeName: String
+    var localNodeName: String
+        private set
+
+    private val _localNodeNameFlow = MutableStateFlow("")
+    val localNodeNameFlow = _localNodeNameFlow.asStateFlow()
 
     private val welcomeMessage = ChatMessage(
         id = "sys-welcome",
@@ -114,10 +118,11 @@ class CipherMeshRepository(
 
         var storedName = prefs.getString("local_node_name", null)
         if (storedName == null) {
-            storedName = "Ghost-" + localNodeId.takeLast(4).uppercase()
+            storedName = "مستخدم-" + localNodeId.takeLast(4).uppercase()
             prefs.edit().putString("local_node_name", storedName).apply()
         }
         localNodeName = storedName
+        _localNodeNameFlow.value = storedName
 
         loadVerifiedPeersFromPrefs()
         loadConversationsFromDisk()
@@ -153,6 +158,33 @@ class CipherMeshRepository(
                     flushPendingOutbox()
                 }
             }
+        }
+    }
+
+    fun updateNodeName(newName: String) {
+        val cleanName = newName.trim()
+        if (cleanName.isEmpty()) return
+        localNodeName = cleanName
+        _localNodeNameFlow.value = cleanName
+        prefs.edit().putString("local_node_name", cleanName).apply()
+        nearbyManager.initialize(localNodeId, cleanName)
+        if (nearbyManager.isAdvertising.value || nearbyManager.isDiscovering.value) {
+            nearbyManager.stopMesh()
+            nearbyManager.startMesh()
+        }
+    }
+
+    fun sendSosAlert() {
+        val sosMessage = "🚨 [نداء طوارئ SOS] من $localNodeName: أحتاج إلى مساعدة أو تواصل فوري عبر الشبكة المباشرة!"
+        sendTextMessage("*", sosMessage)
+    }
+
+    fun clearAllConversations() {
+        synchronized(dbLock) {
+            _conversations.value = mapOf("*" to listOf(welcomeMessage))
+            pendingOutbox.clear()
+            try { chatsDbFile.delete() } catch (e: Exception) {}
+            try { outboxDbFile.delete() } catch (e: Exception) {}
         }
     }
 
@@ -362,7 +394,10 @@ class CipherMeshRepository(
                 originalPacket.payloadCiphertext
             }
 
-            val updatedPacket = originalPacket.copy(payloadCiphertext = reEncrypted)
+            val updatedPacket = originalPacket.copy(
+                sourceNodeName = localNodeName,
+                payloadCiphertext = reEncrypted
+            )
             nearbyManager.sendMeshPacket(updatedPacket)
 
             if (recipientId == "*") {
@@ -573,7 +608,7 @@ class CipherMeshRepository(
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
             destinationNodeId = recipientId,
-            ttl = 5,
+            ttl = if (text.startsWith("🚨")) 12 else 6,
             hopCount = 0,
             packetType = PacketType.TEXT_MESSAGE,
             payloadCiphertext = encrypted

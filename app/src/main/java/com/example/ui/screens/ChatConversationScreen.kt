@@ -7,10 +7,24 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -18,21 +32,57 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.mesh.CallType
@@ -51,9 +101,13 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private val nullStringVal: String? = null
+
 @Composable
 fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+
     val selectedPeerId by viewModel.selectedPeerId.collectAsState()
     val connectedPeers by viewModel.connectedPeers.collectAsState()
     val messages by viewModel.activeMessages.collectAsState()
@@ -63,18 +117,56 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     val verifiedPeers by viewModel.verifiedPeers.collectAsState()
     val peerToVerify by viewModel.peerToVerify.collectAsState()
 
+    val translatedMessages by viewModel.translatedMessages.collectAsState()
+    val pinnedMessages by viewModel.pinnedMessages.collectAsState()
+    val isSelfDestructEnabled by viewModel.isSelfDestructEnabled.collectAsState()
+
     var inputText by remember { mutableStateOf("") }
+    var selectedMessageId by remember { mutableStateOf(nullStringVal) }
+    var editingMessageId by remember { mutableStateOf(nullStringVal) }
+    var editingTextValue by remember { mutableStateOf("") }
+    var replyQuoteText by remember { mutableStateOf(nullStringVal) }
+    var replyQuoteSender by remember { mutableStateOf(nullStringVal) }
+
+    var isSearchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var fullScreenImagePath by remember { mutableStateOf(nullStringVal) }
+
     val listState = rememberLazyListState()
+
+    val currentPeerKey = selectedPeerId ?: "*"
+    val currentPinnedText = pinnedMessages[currentPeerKey]
 
     val currentPeer = connectedPeers.values.find { it.nodeId == selectedPeerId || it.endpointId == selectedPeerId }
     val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "البث العام للشبكة" else "متصل-${selectedPeerId?.take(4)}"
     val isBroadcast = selectedPeerId == "*" || selectedPeerId == null
     val isVerified = selectedPeerId != null && verifiedPeers.contains(selectedPeerId)
 
+    val displayedMessages = remember(messages, searchQuery, isSearchActive) {
+        if (!isSearchActive || searchQuery.isBlank()) {
+            messages
+        } else {
+            messages.filter { it.text.contains(searchQuery.trim(), ignoreCase = true) }
+        }
+    }
+
+    val quickReplies = remember {
+        listOf(
+            "👍 تم الاستلام",
+            "📍 أين موقعك؟",
+            "📞 اتصل بي الآن",
+            "✅ أنا في الطريق",
+            "⏳ انتظر لحظة",
+            "🔒 الشبكة آمنة"
+        )
+    }
+
     BackHandler { viewModel.navigateTo(AppScreen.CHATS) }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    LaunchedEffect(displayedMessages.size) {
+        if (displayedMessages.isNotEmpty()) {
+            listState.animateScrollToItem(displayedMessages.size - 1)
+        }
     }
 
     val mediaPickerLauncher = rememberLauncherForActivityResult(
@@ -87,12 +179,13 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     }
 
     Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
+        // Top Header Bar
         Row(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                 IconButton(onClick = { viewModel.navigateTo(AppScreen.CHATS) }, modifier = Modifier.testTag("back_button")) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = Color.White)
                 }
@@ -112,22 +205,47 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 Spacer(Modifier.width(10.dp))
                 Column {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(peerDisplayName, style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = peerDisplayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         if (isVerified) {
                             Spacer(Modifier.width(4.dp))
                             Icon(Icons.Default.CheckCircle, contentDescription = "موثوق", tint = EmeraldSecure, modifier = Modifier.size(14.dp))
                         }
                     }
                     Text(
-                        text = if (isBroadcast) "بث شبكي متعدد القفزات" else if (currentPeer != null) "اتصال مباشر • مشفر AES-256" else "تم التوجيه عبر الشبكة",
+                        text = when {
+                            isSelfDestructEnabled -> "تدمير ذاتي للرسائل (60ث) نشط ⏱️"
+                            isBroadcast -> "بث شبكي متعدد القفزات"
+                            currentPeer != null -> "اتصال مباشر • مشفر AES-256"
+                            else -> "مزامنة ذكية عبر الشبكة"
+                        },
                         fontSize = 11.sp,
-                        color = if (isBroadcast) AmberMesh else EmeraldSecure
+                        color = if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure
                     )
                 }
             }
 
-            if (!isBroadcast && selectedPeerId != null) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = {
+                        isSearchActive = !isSearchActive
+                        if (!isSearchActive) searchQuery = ""
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "بحث في المحادثة",
+                        tint = if (isSearchActive) AmberMesh else Color.LightGray
+                    )
+                }
+
+                if (!isBroadcast && selectedPeerId != null) {
                     IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE) }, modifier = Modifier.testTag("voice_call_button")) {
                         Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية", tint = CyanPrimary)
                     }
@@ -143,20 +261,183 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
+        // In-Chat Search Bar
+        if (isSearchActive) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF0B1424))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("ابحث عن كلمة داخل الرسائل...", fontSize = 12.sp, color = Color.Gray) },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(onClick = {
+                    isSearchActive = false
+                    searchQuery = ""
+                }) {
+                    Icon(Icons.Default.Close, contentDescription = "إغلاق البحث", tint = Color.LightGray)
+                }
+            }
+        }
+
+        // Pinned Message Banner
+        if (!currentPinnedText.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF132238))
+                    .border(0.5.dp, AmberMesh.copy(alpha = 0.5f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.Star, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("رسالة مثبتة 📌", fontSize = 10.sp, color = AmberMesh, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = currentPinnedText,
+                            fontSize = 12.sp,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = { viewModel.pinMessageInActiveChat(null) },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "إلغاء التثبيت", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+
+        // Messages List
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom)
         ) {
-            items(messages) { message ->
+            items(displayedMessages) { message ->
+                val isSelected = (selectedMessageId == message.id)
+                val translatedText = translatedMessages[message.id]
+
                 MessageBubble(
                     message = message,
                     isPlaying = playingMessageId == message.id,
-                    onPlayVoiceNote = { viewModel.playVoiceNote(message.id, message.mediaUri ?: "") }
+                    isSelected = isSelected,
+                    translatedText = translatedText,
+                    onBubbleClick = {
+                        selectedMessageId = if (selectedMessageId == message.id) null else message.id
+                    },
+                    onPlayVoiceNote = { viewModel.playVoiceNote(message.id, message.mediaUri ?: "") },
+                    onImageClick = { path -> fullScreenImagePath = path },
+                    onTranslateClick = {
+                        viewModel.translateMessageToArabic(message.id, message.text)
+                    },
+                    onEditClick = {
+                        editingMessageId = message.id
+                        editingTextValue = message.text.replace("(معدلة ✏️)", "").trim()
+                        selectedMessageId = null
+                    },
+                    onReplyClick = {
+                        replyQuoteSender = if (message.isOutgoing) "أنت" else message.senderName
+                        replyQuoteText = message.text
+                        selectedMessageId = null
+                    },
+                    onPinClick = {
+                        viewModel.pinMessageInActiveChat(message.text)
+                        selectedMessageId = null
+                    },
+                    onCopyClick = {
+                        clipboardManager.setText(AnnotatedString(message.text))
+                        selectedMessageId = null
+                    },
+                    onDeleteClick = {
+                        viewModel.deleteMessageInActiveChat(message.id)
+                        selectedMessageId = null
+                    }
                 )
             }
         }
 
+        // Quick Tactical Replies Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF0B1424))
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            for (quickText in quickReplies) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF132238))
+                        .border(1.dp, CyanPrimary.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                        .clickable { viewModel.sendTextMessage(quickText) }
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = quickText,
+                        fontSize = 11.sp,
+                        color = Color(0xFFE6F1FF),
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+
+        // Reply Quote Preview Banner
+        if (!replyQuoteText.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF132238))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "الرد على ${replyQuoteSender ?: "رسالة"} ↩️",
+                        fontSize = 10.sp,
+                        color = CyanPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = replyQuoteText ?: "",
+                        fontSize = 11.sp,
+                        color = Color.LightGray,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        replyQuoteText = null
+                        replyQuoteSender = null
+                    },
+                    modifier = Modifier.size(26.dp)
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "إلغاء الرد", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+
+        // Bottom Input or Voice Recording Bar
         if (isRecordingVoice) {
             VoiceNoteRecordingBar(
                 durationSec = recordingDuration,
@@ -178,7 +459,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("اكتب رسالة مشفرة...", color = Color(0xFF536B8D), fontSize = 13.sp) },
+                    placeholder = { Text("اكتب رسالة مشفرة (أو اضغط على أي رسالة لترجمتها وتعديلها)...", color = Color(0xFF536B8D), fontSize = 12.sp) },
                     modifier = Modifier.weight(1f).testTag("message_input_field"),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -192,8 +473,15 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = {
                         if (inputText.isNotBlank()) {
-                            viewModel.sendTextMessage(inputText)
+                            val finalMsg = if (!replyQuoteText.isNullOrBlank()) {
+                                "↩️ [${replyQuoteText?.take(35)}]\n$inputText"
+                            } else {
+                                inputText
+                            }
+                            viewModel.sendTextMessage(finalMsg)
                             inputText = ""
+                            replyQuoteText = null
+                            replyQuoteSender = null
                         }
                     }),
                     maxLines = 4
@@ -204,8 +492,15 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 if (inputText.isNotBlank()) {
                     IconButton(
                         onClick = {
-                            viewModel.sendTextMessage(inputText)
+                            val finalMsg = if (!replyQuoteText.isNullOrBlank()) {
+                                "↩️ [${replyQuoteText?.take(35)}]\n$inputText"
+                            } else {
+                                inputText
+                            }
+                            viewModel.sendTextMessage(finalMsg)
                             inputText = ""
+                            replyQuoteText = null
+                            replyQuoteSender = null
                         },
                         modifier = Modifier.size(44.dp).clip(CircleShape).background(CyanPrimary).testTag("send_button")
                     ) {
@@ -223,6 +518,106 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         }
     }
 
+    // Edit Message Dialog
+    val activeEditId = editingMessageId
+    if (activeEditId != null) {
+        Dialog(onDismissRequest = { editingMessageId = null }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, CyanPrimary)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Edit, contentDescription = null, tint = CyanPrimary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "تعديل الرسالة المرسلة",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "سيتم تحديث نص الرسالة فوراً لديك ولدى الطرف المتصل:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = editingTextValue,
+                        onValueChange = { editingTextValue = it },
+                        label = { Text("النص الجديد", color = CyanPrimary) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(
+                            onClick = { editingMessageId = null },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("إلغاء", color = Color.LightGray)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (editingTextValue.isNotBlank()) {
+                                    viewModel.editMessageInActiveChat(activeEditId, editingTextValue)
+                                    editingMessageId = null
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldSecure),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("حفظ التعديل ✏️", color = Color(0xFF00220F), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Full-Screen Image Viewer Dialog
+    val previewPath = fullScreenImagePath
+    if (previewPath != null) {
+        Dialog(onDismissRequest = { fullScreenImagePath = null }) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF070D18)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, CyanPrimary)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("معاينة الصورة بوضوح كامل", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        IconButton(onClick = { fullScreenImagePath = null }) {
+                            Icon(Icons.Default.Close, contentDescription = "إغلاق", tint = Color.White)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    AsyncImage(
+                        model = ImageRequest.Builder(LocalContext.current).data(File(previewPath)).crossfade(true).build(),
+                        contentDescription = "معاينة الصورة",
+                        modifier = Modifier.fillMaxWidth().height(360.dp).clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            }
+        }
+    }
+
     peerToVerify?.let { peer ->
         SecurityVerificationDialog(
             peer = peer,
@@ -234,10 +629,28 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceNote: () -> Unit) {
+private fun MessageBubble(
+    message: ChatMessage,
+    isPlaying: Boolean,
+    isSelected: Boolean,
+    translatedText: String?,
+    onBubbleClick: () -> Unit,
+    onPlayVoiceNote: () -> Unit,
+    onImageClick: (String) -> Unit,
+    onTranslateClick: () -> Unit,
+    onEditClick: () -> Unit,
+    onReplyClick: () -> Unit,
+    onPinClick: () -> Unit,
+    onCopyClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
     val alignment = if (message.isOutgoing) Alignment.End else Alignment.Start
     val bubbleColor = if (message.isOutgoing) Color(0xFF003644) else Color(0xFF132038)
-    val borderColor = if (message.isOutgoing) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1F355A)
+    val borderColor = if (isSelected) AmberMesh else if (message.isOutgoing) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1F355A)
+
+    val hasEnglishChars = remember(message.text) {
+        message.text.any { it in 'a'..'z' || it in 'A'..'Z' }
+    }
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
         if (message.hopCount in 1..Int.MAX_VALUE || message.relayPath.isNotEmpty()) {
@@ -253,7 +666,8 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
             modifier = Modifier
                 .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = if (message.isOutgoing) 16.dp else 4.dp, bottomEnd = if (message.isOutgoing) 4.dp else 16.dp))
                 .background(bubbleColor)
-                .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+                .border(if (isSelected) 1.5.dp else 1.dp, borderColor, RoundedCornerShape(16.dp))
+                .clickable { onBubbleClick() }
                 .padding(12.dp)
         ) {
             Column {
@@ -269,7 +683,10 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
                             AsyncImage(
                                 model = ImageRequest.Builder(LocalContext.current).data(file).crossfade(true).build(),
                                 contentDescription = "صورة",
-                                modifier = Modifier.size(200.dp).clip(RoundedCornerShape(10.dp)),
+                                modifier = Modifier
+                                    .size(210.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onImageClick(file.absolutePath) },
                                 contentScale = ContentScale.Crop
                             )
                         } else {
@@ -278,6 +695,95 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
                     }
                     MediaType.AUDIO_NOTE -> VoiceNoteBubble(isPlaying = isPlaying, text = message.text, onPlayClick = onPlayVoiceNote)
                     else -> Text(message.text, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE6F1FF))
+                }
+
+                // Offline Arabic Translation Box
+                if (!translatedText.isNullOrBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF071322))
+                            .border(1.dp, EmeraldSecure.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = "🌐 الترجمة الفورية للعربية:",
+                                fontSize = 10.sp,
+                                color = EmeraldSecure,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = translatedText,
+                                fontSize = 13.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+                // Quick Translate Prompt for English Messages
+                if (hasEnglishChars && translatedText.isNullOrBlank() && !isSelected) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "🌐 اضغط لترجمة الرسالة للعربية",
+                        fontSize = 10.sp,
+                        color = CyanPrimary,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.clickable { onTranslateClick() }
+                    )
+                }
+
+                // Interactive Message Action Bar when tapped
+                if (isSelected) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF070D18))
+                            .border(1.dp, Color(0xFF1F355A), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ActionChipButton(
+                            label = "ترجمة 🌐",
+                            color = EmeraldSecure,
+                            onClick = onTranslateClick
+                        )
+                        if (message.isOutgoing && message.mediaType == null) {
+                            ActionChipButton(
+                                label = "تعديل ✏️",
+                                color = CyanPrimary,
+                                onClick = onEditClick
+                            )
+                        }
+                        ActionChipButton(
+                            label = "رد ↩️",
+                            color = Color.White,
+                            onClick = onReplyClick
+                        )
+                        ActionChipButton(
+                            label = "تثبيت 📌",
+                            color = AmberMesh,
+                            onClick = onPinClick
+                        )
+                        ActionChipButton(
+                            label = "نسخ 📋",
+                            color = Color.LightGray,
+                            onClick = onCopyClick
+                        )
+                        if (message.id != "sys-welcome") {
+                            ActionChipButton(
+                                label = "حذف 🗑️",
+                                color = RedAlert,
+                                onClick = onDeleteClick
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(4.dp))
@@ -300,6 +806,28 @@ private fun MessageBubble(message: ChatMessage, isPlaying: Boolean, onPlayVoiceN
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ActionChipButton(
+    label: String,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(color.copy(alpha = 0.15f))
+            .clickable { onClick() }
+            .padding(horizontal = 7.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            color = color,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 

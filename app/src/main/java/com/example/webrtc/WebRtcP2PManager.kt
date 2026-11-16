@@ -51,7 +51,7 @@ class WebRtcP2PManager(
         private const val AUDIO_CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
-        private const val FRAME_INTERVAL_MS = 120L
+        private const val FRAME_INTERVAL_MS = 100L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -102,7 +102,6 @@ class WebRtcP2PManager(
     private var audioRecordJob: Job? = null
     private var audioTrack: AudioTrack? = null
     private var audioRecord: AudioRecord? = null
-    private var cameraProvider: ProcessCameraProvider? = null
     private val audioWriteLock = Any()
 
     private var frameCounter = 0
@@ -128,7 +127,7 @@ class WebRtcP2PManager(
                 delay(1000)
                 val now = System.currentTimeMillis()
                 val elapsedMs = now - lastStatsResetTime
-                if (elapsedMs in 1000L..Long.MAX_VALUE) {
+                if (elapsedMs > 0) {
                     val deltaSec = elapsedMs / 1000.0
                     _fps.value = (frameCounter / deltaSec).toInt()
                     _bitrateKbps.value = ((byteCounter * 8) / (deltaSec * 1024)).toInt()
@@ -235,30 +234,18 @@ class WebRtcP2PManager(
     private fun stopMediaEngines() {
         stopAudioRecording()
         stopAudioPlayback()
-        try {
-            ContextCompat.getMainExecutor(context).execute {
-                try { cameraProvider?.unbindAll() } catch (t: Throwable) {}
-            }
-        } catch (t: Throwable) {}
     }
 
     fun bindCameraCapture(lifecycleOwner: LifecycleOwner) {
-        val hasCameraPerm = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+        val hasCameraPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (!hasCameraPerm) return
 
         try {
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
             cameraProviderFuture.addListener({
                 try {
-                    cameraProvider = cameraProviderFuture.get()
-                    val cameraSelector = if (_isFrontCamera.value) {
-                        CameraSelector.DEFAULT_FRONT_CAMERA
-                    } else {
-                        CameraSelector.DEFAULT_BACK_CAMERA
-                    }
+                    val cameraProvider = cameraProviderFuture.get()
+                    val cameraSelector = if (_isFrontCamera.value) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
 
                     val imageAnalysis = ImageAnalysis.Builder()
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
@@ -269,43 +256,33 @@ class WebRtcP2PManager(
                         processCameraFrame(imageProxy)
                     }
 
-                    cameraProvider?.unbindAll()
-                    cameraProvider?.bindToLifecycle(lifecycleOwner, cameraSelector, imageAnalysis)
-                } catch (t: Throwable) {
-                    Log.e(TAG, "Camera bind err: ${t.message}")
-                }
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, imageAnalysis)
+                } catch (t: Throwable) {}
             }, ContextCompat.getMainExecutor(context))
-        } catch (t: Throwable) {
-            Log.e(TAG, "Camera init err: ${t.message}")
-        }
+        } catch (t: Throwable) {}
     }
 
     private fun processCameraFrame(imageProxy: ImageProxy) {
         try {
             val now = System.currentTimeMillis()
-            val isTooSoon = (now - lastFrameSentTime) in 0L until FRAME_INTERVAL_MS
-            if (_isVideoMuted.value || isTooSoon) {
+            if (_isVideoMuted.value || (now - lastFrameSentTime < FRAME_INTERVAL_MS)) {
                 return
             }
             lastFrameSentTime = now
 
-            val jpegBytes = imageProxyToJpeg(imageProxy, quality = 42)
+            val jpegBytes = imageProxyToJpeg(imageProxy, quality = 35)
             if (jpegBytes != null && _callState.value == CallState.CONNECTED) {
                 val peerId = _activePeerId.value
                 val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
                 val frameToSend = if (sessionKey != null) {
-                    try {
-                        CryptoManager.encryptAesGcm(jpegBytes, sessionKey)
-                    } catch (t: Throwable) {
-                        jpegBytes
-                    }
+                    try { CryptoManager.encryptAesGcm(jpegBytes, sessionKey) } catch (t: Throwable) { jpegBytes }
                 } else {
                     jpegBytes
                 }
                 nearbyManager.sendDirectVideoFrame(frameToSend)
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Frame process err: ${t.message}")
         } finally {
             try { imageProxy.close() } catch (t: Throwable) {}
         }
@@ -316,7 +293,7 @@ class WebRtcP2PManager(
         try {
             val peerId = _activePeerId.value
             val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-            val decryptedBytes = if (sessionKey != null && encryptedFrame.size in 29..Int.MAX_VALUE) {
+            val decryptedBytes = if (sessionKey != null && encryptedFrame.size > 28) {
                 try {
                     CryptoManager.decryptAesGcm(encryptedFrame, sessionKey)
                 } catch (t: Throwable) {
@@ -332,16 +309,14 @@ class WebRtcP2PManager(
                 frameCounter += 1
                 byteCounter += encryptedFrame.size
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "Decode video err: ${t.message}")
-        }
+        } catch (t: Throwable) {}
     }
 
     private fun imageProxyToJpeg(image: ImageProxy, quality: Int): ByteArray? {
         try {
             val width = image.width
             val height = image.height
-            if (width !in 16..4096 || height !in 16..4096) return null
+            if (width < 16 || height < 16) return null
 
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
@@ -388,19 +363,15 @@ class WebRtcP2PManager(
 
             val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
             val rawOut = ByteArrayOutputStream()
-            yuvImage.compressToJpeg(Rect(0, 0, width, height), 60, rawOut)
+            yuvImage.compressToJpeg(Rect(0, 0, width, height), 50, rawOut)
             val rawBytes = rawOut.toByteArray()
 
             val rawBmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return rawBytes
             val matrix = Matrix()
             val rot = image.imageInfo.rotationDegrees.toFloat()
-            if (rot != 0f) {
-                matrix.postRotate(rot)
-            }
-            if (_isFrontCamera.value) {
-                matrix.postScale(-1f, 1f)
-            }
-            val scale = minOf(240f / rawBmp.width.toFloat(), 320f / rawBmp.height.toFloat(), 1f)
+            if (rot != 0f) matrix.postRotate(rot)
+            if (_isFrontCamera.value) matrix.postScale(-1f, 1f)
+            val scale = minOf(200f / rawBmp.width.toFloat(), 250f / rawBmp.height.toFloat(), 1f)
             matrix.postScale(scale, scale)
 
             val finalBmp = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, matrix, true)
@@ -410,7 +381,6 @@ class WebRtcP2PManager(
             finalBmp.compress(Bitmap.CompressFormat.JPEG, quality, finalOut)
             return finalOut.toByteArray()
         } catch (t: Throwable) {
-            Log.e(TAG, "YUV convert err: ${t.message}")
             return null
         }
     }
@@ -418,10 +388,7 @@ class WebRtcP2PManager(
     @SuppressLint("MissingPermission")
     private fun startAudioRecording() {
         stopAudioRecording()
-        val hasAudioPerm = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
+        val hasAudioPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (!hasAudioPerm) return
 
         try {
@@ -436,10 +403,7 @@ class WebRtcP2PManager(
                 bufferSize
             )
 
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                return
-            }
-
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) return
             audioRecord?.startRecording()
 
             audioRecordJob = scope.launch(Dispatchers.IO) {
@@ -447,7 +411,7 @@ class WebRtcP2PManager(
                 while (isActive && _callState.value == CallState.CONNECTED) {
                     if (!_isMicMuted.value) {
                         val read = try { audioRecord?.read(buffer, 0, buffer.size) ?: 0 } catch (t: Throwable) { 0 }
-                        if (read in 1..Int.MAX_VALUE) {
+                        if (read > 0) {
                             val peerId = _activePeerId.value
                             val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
                             val rawChunk = buffer.copyOf(read)
@@ -459,24 +423,18 @@ class WebRtcP2PManager(
                             nearbyManager.sendDirectAudioFrame(encryptedAudio)
                         }
                     } else {
-                        delay(40)
+                        delay(20)
                     }
                 }
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "AudioRecord start err: ${t.message}")
-        }
+        } catch (t: Throwable) {}
     }
 
     private fun stopAudioRecording() {
         audioRecordJob?.cancel()
         audioRecordJob = null
-        try {
-            audioRecord?.stop()
-        } catch (t: Throwable) {}
-        try {
-            audioRecord?.release()
-        } catch (t: Throwable) {}
+        try { audioRecord?.stop() } catch (t: Throwable) {}
+        try { audioRecord?.release() } catch (t: Throwable) {}
         audioRecord = null
     }
 
@@ -505,19 +463,13 @@ class WebRtcP2PManager(
                 .build()
 
             audioTrack?.play()
-        } catch (t: Throwable) {
-            Log.e(TAG, "AudioTrack start err: ${t.message}")
-        }
+        } catch (t: Throwable) {}
     }
 
     private fun stopAudioPlayback() {
         synchronized(audioWriteLock) {
-            try {
-                audioTrack?.stop()
-            } catch (t: Throwable) {}
-            try {
-                audioTrack?.release()
-            } catch (t: Throwable) {}
+            try { audioTrack?.stop() } catch (t: Throwable) {}
+            try { audioTrack?.release() } catch (t: Throwable) {}
             audioTrack = null
         }
     }
@@ -528,7 +480,7 @@ class WebRtcP2PManager(
         try {
             val peerId = _activePeerId.value
             val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-            val pcmAudio = if (sessionKey != null && encryptedAudio.size in 29..Int.MAX_VALUE) {
+            val pcmAudio = if (sessionKey != null && encryptedAudio.size > 28) {
                 try {
                     CryptoManager.decryptAesGcm(encryptedAudio, sessionKey)
                 } catch (t: Throwable) {
@@ -543,19 +495,11 @@ class WebRtcP2PManager(
                     track.write(pcmAudio, 0, pcmAudio.size)
                 }
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "Audio play err: ${t.message}")
-        }
+        } catch (t: Throwable) {}
     }
 
-    fun toggleMic() {
-        _isMicMuted.value = !_isMicMuted.value
-    }
-
-    fun toggleVideo() {
-        _isVideoMuted.value = !_isVideoMuted.value
-    }
-
+    fun toggleMic() { _isMicMuted.value = !_isMicMuted.value }
+    fun toggleVideo() { _isVideoMuted.value = !_isVideoMuted.value }
     fun toggleSpeaker() {
         _isSpeakerOn.value = !_isSpeakerOn.value
         try {
@@ -563,7 +507,6 @@ class WebRtcP2PManager(
             audioManager?.isSpeakerphoneOn = _isSpeakerOn.value
         } catch (t: Throwable) {}
     }
-
     fun toggleCamera(lifecycleOwner: LifecycleOwner) {
         _isFrontCamera.value = !_isFrontCamera.value
         bindCameraCapture(lifecycleOwner)

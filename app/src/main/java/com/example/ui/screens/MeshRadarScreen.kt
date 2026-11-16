@@ -469,13 +469,14 @@ fun MeshRadarScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(allPeers) {
+                    val peerItem = it
                     PeerNodeCard(
-                        peer = it,
-                        isVerified = verifiedPeers.contains(it.nodeId),
-                        onConnectClick = { viewModel.connectToPeer(it.endpointId) },
-                        onDisconnectClick = { viewModel.disconnectPeer(it.endpointId) },
-                        onChatClick = { viewModel.openConversation(it.nodeId) },
-                        onVerifyClick = { viewModel.openVerificationDialog(it) }
+                        peer = peerItem,
+                        isVerified = verifiedPeers.contains(peerItem.nodeId),
+                        onConnectClick = { viewModel.connectToPeer(peerItem.endpointId) },
+                        onDisconnectClick = { viewModel.disconnectPeer(peerItem.endpointId) },
+                        onChatClick = { viewModel.openConversation(peerItem.nodeId) },
+                        onVerifyClick = { viewModel.openVerificationDialog(peerItem) }
                     )
                 }
             }
@@ -590,7 +591,7 @@ fun MeshRadarScreen(
                             color = Color.Gray
                         )
                     } else {
-                        connectedPeers.values.forEach {
+                        for (peerItem in connectedPeers.values) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -604,11 +605,11 @@ fun MeshRadarScreen(
                                     modifier = Modifier
                                         .size(8.dp)
                                         .clip(CircleShape)
-                                        .background(if (it.isDirect) EmeraldSecure else AmberMesh)
+                                        .background(if (peerItem.isDirect) EmeraldSecure else AmberMesh)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "${it.nodeName} • القفزات: ${it.hops}",
+                                    text = "${peerItem.nodeName} • القفزات: ${peerItem.hops}",
                                     fontSize = 12.sp,
                                     color = CyanPrimary,
                                     fontFamily = FontFamily.Monospace
@@ -621,11 +622,12 @@ fun MeshRadarScreen(
         }
     }
 
-    peerToVerify?.let {
+    val verifyPeer = peerToVerify
+    if (verifyPeer != null) {
         SecurityVerificationDialog(
-            peer = it,
-            isVerified = verifiedPeers.contains(it.nodeId),
-            onVerifyClick = { viewModel.markPeerVerified(it.nodeId) },
+            peer = verifyPeer,
+            isVerified = verifiedPeers.contains(verifyPeer.nodeId),
+            onVerifyClick = { viewModel.markPeerVerified(verifyPeer.nodeId) },
             onDismiss = { viewModel.closeVerificationDialog() }
         )
     }

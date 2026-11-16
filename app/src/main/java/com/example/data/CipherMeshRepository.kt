@@ -36,6 +36,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.Collections
+import java.util.Locale
 import java.util.UUID
 
 class CipherMeshRepository(
@@ -59,7 +60,6 @@ class CipherMeshRepository(
     private val _localNodeNameFlow = MutableStateFlow("")
     val localNodeNameFlow = _localNodeNameFlow.asStateFlow()
 
-    // Exclusive Competitive Features States
     private val _isSelfDestructEnabled = MutableStateFlow(false)
     val isSelfDestructEnabled = _isSelfDestructEnabled.asStateFlow()
 
@@ -75,6 +75,12 @@ class CipherMeshRepository(
     private val _isAppLocked = MutableStateFlow(false)
     val isAppLocked = _isAppLocked.asStateFlow()
 
+    private val _translatedMessages = MutableStateFlow(mapOf("init" to "").minus("init"))
+    val translatedMessages = _translatedMessages.asStateFlow()
+
+    private val _pinnedMessages = MutableStateFlow(mapOf("init" to "").minus("init"))
+    val pinnedMessages = _pinnedMessages.asStateFlow()
+
     private val autoReplyCooldownMap = Collections.synchronizedMap(mutableMapOf("init" to 0L).apply { clear() })
 
     private val welcomeMessage = ChatMessage(
@@ -82,7 +88,7 @@ class CipherMeshRepository(
         senderId = "system",
         senderName = "نظام الشبكة",
         recipientId = "*",
-        text = "مرحباً بك في CipherMesh. المحادثات الدائمة، اللاسلكي الفوري، والمزامنة الذكية بدون إنترنت نشطة.",
+        text = "مرحباً بك في CipherMesh. المحادثات الدائمة، تعديل الرسائل، والترجمة الفورية بدون إنترنت نشطة.",
         timestamp = System.currentTimeMillis(),
         isOutgoing = false,
         status = MessageStatus.DELIVERED,
@@ -125,6 +131,81 @@ class CipherMeshRepository(
     private var mediaPlayer: MediaPlayer? = null
     private val _playingMessageId = MutableStateFlow(nullString)
     val playingMessageId = _playingMessageId.asStateFlow()
+
+    private val offlinePhraseDictionary = mapOf(
+        "how are you" to "كيف حالك؟",
+        "how are you doing" to "كيف أمورك؟",
+        "where are you" to "أين أنت؟",
+        "i am on my way" to "أنا في طريقي إليك",
+        "on my way" to "في الطريق",
+        "call me" to "اتصل بي",
+        "can you call me" to "هل يمكنك الاتصال بي؟",
+        "i need help" to "أحتاج إلى مساعدة",
+        "help me" to "ساعدني",
+        "are you there" to "هل أنت موجود؟",
+        "wait a minute" to "انتظر دقيقة",
+        "wait for me" to "انتظرني",
+        "thank you" to "شكراً لك",
+        "thanks a lot" to "شكراً جزيلاً",
+        "good morning" to "صباح الخير",
+        "good evening" to "مساء الخير",
+        "good night" to "تصبح على خير",
+        "see you soon" to "أراك قريباً",
+        "see you later" to "أراك لاحقاً",
+        "what is your location" to "ما هو موقعك؟",
+        "send me the file" to "أرسل لي الملف",
+        "send me a picture" to "أرسل لي صورة",
+        "the connection is good" to "الاتصال ممتاز",
+        "no internet" to "لا يوجد إنترنت",
+        "everything is ok" to "كل شيء على ما يرام",
+        "i am busy" to "أنا مشغول حالياً",
+        "i am ready" to "أنا جاهز",
+        "are you ready" to "هل أنت جاهز؟",
+        "come here" to "تعال إلى هنا",
+        "let us go" to "هيا بنا نذهب",
+        "what happened" to "ماذا حدث؟",
+        "don't worry" to "لا تقلق",
+        "do not worry" to "لا تقلق",
+        "be careful" to "كن حذراً",
+        "i agree" to "أنا موافق",
+        "i don't know" to "لا أعرف",
+        "i do not know" to "لا أعرف"
+    )
+
+    private val offlineWordDictionary = mapOf(
+        "hello" to "مرحباً", "hi" to "أهلاً", "hey" to "يا هلا", "welcome" to "أهلاً وسهلاً",
+        "yes" to "نعم", "no" to "لا", "ok" to "حسناً", "okay" to "تمام", "sure" to "بالتأكيد",
+        "please" to "من فضلك", "thanks" to "شكراً", "thank" to "شكر", "sorry" to "عذراً",
+        "i" to "أنا", "you" to "أنت", "he" to "هو", "she" to "هي", "we" to "نحن", "they" to "هم",
+        "my" to "خاصتي", "your" to "خاصتك", "our" to "خاصتنا", "me" to "لي", "us" to "لنا",
+        "am" to "", "is" to "يكون", "are" to "", "was" to "كان", "were" to "كانوا",
+        "will" to "سوف", "can" to "يستطيع", "cannot" to "لا يستطيع", "must" to "يجب",
+        "have" to "لدي", "has" to "لديه", "had" to "كان لديه", "do" to "يفعل", "not" to "ليس",
+        "what" to "ماذا", "where" to "أين", "when" to "متى", "why" to "لماذا", "who" to "من", "how" to "كيف",
+        "good" to "جيد", "bad" to "سيئ", "great" to "رائع", "fine" to "بخير", "safe" to "آمن",
+        "danger" to "خطر", "emergency" to "طوارئ", "urgent" to "عاجل", "important" to "مهم",
+        "fast" to "سريع", "slow" to "بطيء", "new" to "جديد", "old" to "قديم", "big" to "كبير", "small" to "صغير",
+        "now" to "الآن", "later" to "لاحقاً", "today" to "اليوم", "tomorrow" to "غداً", "yesterday" to "أمس",
+        "time" to "وقت", "minute" to "دقيقة", "minutes" to "دقائق", "hour" to "ساعة", "hours" to "ساعات",
+        "here" to "هنا", "there" to "هناك", "near" to "قريب", "far" to "بعيد", "inside" to "داخل", "outside" to "خارج",
+        "home" to "المنزل", "work" to "العمل", "market" to "السوق", "road" to "الطريق", "place" to "المكان",
+        "location" to "الموقع", "direction" to "الاتجاه", "north" to "شمال", "south" to "جنوب", "east" to "شرق", "west" to "غرب",
+        "go" to "اذهب", "going" to "ذاهب", "come" to "تعال", "coming" to "قادم", "wait" to "انتظر", "waiting" to "أنتظر",
+        "stop" to "توقف", "start" to "ابدأ", "send" to "أرسل", "sent" to "تم الإرسال", "receive" to "استلم", "received" to "تم الاستلام",
+        "call" to "اتصال", "video" to "فيديو", "voice" to "صوت", "audio" to "صوت", "message" to "رسالة", "messages" to "رسائل",
+        "image" to "صورة", "photo" to "صورة", "picture" to "صورة", "file" to "ملف", "phone" to "هاتف", "battery" to "البطارية",
+        "network" to "الشبكة", "mesh" to "الشبكة المباشرة", "wifi" to "واي فاي", "bluetooth" to "بلوتوث",
+        "connected" to "متصل", "disconnected" to "غير متصل", "online" to "متصل", "offline" to "بدون إنترنت",
+        "encrypted" to "مشفر", "secure" to "آمن", "key" to "مفتاح", "password" to "كلمة المرور", "code" to "رمز",
+        "need" to "أحتاج", "want" to "أريد", "know" to "أعرف", "see" to "أرى", "hear" to "أسمع", "speak" to "أتحدث",
+        "talk" to "تحدث", "open" to "افتح", "close" to "أغلق", "check" to "تحقق", "help" to "مساعدة",
+        "friend" to "صديق", "brother" to "أخ", "team" to "الفريق", "group" to "المجموعة", "everyone" to "الجميع",
+        "water" to "ماء", "food" to "طعام", "car" to "سيارة", "money" to "مال", "shop" to "محل",
+        "one" to "واحد", "two" to "اثنان", "three" to "ثلاثة", "four" to "أربعة", "five" to "خمسة",
+        "six" to "ستة", "seven" to "سبعة", "eight" to "ثمانية", "nine" to "تسعة", "ten" to "عشرة",
+        "and" to "و", "or" to "أو", "but" to "لكن", "with" to "مع", "without" to "بدون", "from" to "من", "to" to "إلى",
+        "in" to "في", "on" to "على", "at" to "عند", "for" to "من أجل", "about" to "حول", "very" to "جداً", "all" to "كل"
+    )
 
     init {
         var storedId = prefs.getString("local_node_id", null)
@@ -189,7 +270,6 @@ class CipherMeshRepository(
             }
         }
 
-        // Self-Destructing Messages Engine (60 seconds TTL)
         scope.launch {
             while (isActive) {
                 delay(5000)
@@ -197,6 +277,116 @@ class CipherMeshRepository(
                     purgeExpiredMessages()
                 }
             }
+        }
+    }
+
+    fun editMessage(peerKey: String, messageId: String, newText: String) {
+        val cleanText = newText.trim()
+        if (cleanText.isEmpty()) return
+        val editedDisplay = if (cleanText.endsWith("(معدلة ✏️)")) cleanText else "$cleanText (معدلة ✏️)"
+
+        _conversations.value = _conversations.value.mapValues { (k, list) ->
+            if (k == peerKey) {
+                list.map { msg ->
+                    if (msg.id == messageId) msg.copy(text = editedDisplay) else msg
+                }
+            } else list
+        }
+        saveConversationsToDisk()
+
+        val cmdPlain = "__CMD_EDIT__|$messageId|$cleanText"
+        val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = peerKey,
+            ttl = 6,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = encrypted
+        )
+        if (nearbyManager.connectedPeers.value.isNotEmpty()) {
+            nearbyManager.sendMeshPacket(packet)
+        }
+    }
+
+    fun deleteMessageForEveryone(peerKey: String, messageId: String) {
+        _conversations.value = _conversations.value.mapValues { (k, list) ->
+            if (k == peerKey) {
+                list.filterNot { it.id == messageId }
+            } else list
+        }
+        saveConversationsToDisk()
+
+        val cmdPlain = "__CMD_DELETE__|$messageId"
+        val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = peerKey,
+            ttl = 6,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = encrypted
+        )
+        if (nearbyManager.connectedPeers.value.isNotEmpty()) {
+            nearbyManager.sendMeshPacket(packet)
+        }
+    }
+
+    fun translateMessageOffline(messageId: String, rawText: String): String {
+        val cleanSource = rawText.replace("(معدلة ✏️)", "").trim()
+        val lower = cleanSource.lowercase(Locale.ROOT)
+            .replace("?", "")
+            .replace("!", "")
+            .replace(".", "")
+            .replace(",", "")
+            .trim()
+
+        val exactPhrase = offlinePhraseDictionary[lower]
+        if (exactPhrase != null) {
+            _translatedMessages.value = _translatedMessages.value + (messageId to exactPhrase)
+            return exactPhrase
+        }
+
+        var workingText = lower
+        for ((engPhrase, arPhrase) in offlinePhraseDictionary) {
+            if (workingText.contains(engPhrase)) {
+                workingText = workingText.replace(engPhrase, arPhrase)
+            }
+        }
+
+        val words = workingText.split(Regex("\\s+"))
+        val translatedWords = mutableListOf("init").apply { clear() }
+        var anyTranslated = false
+
+        for (w in words) {
+            val mapped = offlineWordDictionary[w]
+            if (mapped != null) {
+                anyTranslated = true
+                if (mapped.isNotEmpty()) {
+                    translatedWords.add(mapped)
+                }
+            } else {
+                translatedWords.add(w)
+            }
+        }
+
+        val finalResult = if (anyTranslated || workingText != lower) {
+            translatedWords.joinToString(" ")
+        } else {
+            "الترجمة المباشرة: $cleanSource"
+        }
+
+        _translatedMessages.value = _translatedMessages.value + (messageId to finalResult)
+        return finalResult
+    }
+
+    fun pinMessageInChat(peerKey: String, messageText: String?) {
+        if (messageText.isNullOrBlank()) {
+            _pinnedMessages.value = _pinnedMessages.value - peerKey
+        } else {
+            _pinnedMessages.value = _pinnedMessages.value + (peerKey to messageText)
         }
     }
 
@@ -253,7 +443,6 @@ class CipherMeshRepository(
 
     fun verifyPinOrDuress(enteredPin: String): Boolean {
         val clean = enteredPin.trim()
-        // Duress Emergency Stealth Code (9911): Wipes all chats & unlocks cleanly
         if (clean == "9911") {
             clearAllConversations()
             _isAppLocked.value = false
@@ -287,6 +476,8 @@ class CipherMeshRepository(
     fun clearAllConversations() {
         synchronized(dbLock) {
             _conversations.value = mapOf("*" to listOf(welcomeMessage))
+            _translatedMessages.value = mapOf("init" to "").minus("init")
+            _pinnedMessages.value = mapOf("init" to "").minus("init")
             pendingOutbox.clear()
             try { chatsDbFile.delete() } catch (e: Exception) {}
             try { outboxDbFile.delete() } catch (e: Exception) {}
@@ -552,6 +743,40 @@ class CipherMeshRepository(
                 } catch (e: Exception) {
                     packet.payloadCiphertext
                 }
+
+                val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
+
+                // Handle Remote Edit Command
+                if (txt.startsWith("__CMD_EDIT__|")) {
+                    val parts = txt.split("|", limit = 3)
+                    if (parts.size == 3) {
+                        val targetId = parts[1]
+                        val newBody = "${parts[2]} (معدلة ✏️)"
+                        _conversations.value = _conversations.value.mapValues { (k, list) ->
+                            if (k == convKey) {
+                                list.map { m -> if (m.id == targetId) m.copy(text = newBody) else m }
+                            } else list
+                        }
+                        saveConversationsToDisk()
+                    }
+                    return
+                }
+
+                // Handle Remote Delete Command
+                if (txt.startsWith("__CMD_DELETE__|")) {
+                    val parts = txt.split("|", limit = 2)
+                    if (parts.size == 2) {
+                        val targetId = parts[1]
+                        _conversations.value = _conversations.value.mapValues { (k, list) ->
+                            if (k == convKey) {
+                                list.filterNot { m -> m.id == targetId }
+                            } else list
+                        }
+                        saveConversationsToDisk()
+                    }
+                    return
+                }
+
                 val msg = ChatMessage(
                     id = packet.packetId,
                     senderId = packet.sourceNodeId,
@@ -565,13 +790,12 @@ class CipherMeshRepository(
                     relayPath = packet.relayedBy,
                     isEncrypted = true
                 )
-                val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
+
                 val list = _conversations.value[convKey] ?: emptyMsgList
                 if (list.none { it.id == msg.id }) {
                     _conversations.value = _conversations.value + (convKey to (list + msg))
                     saveConversationsToDisk()
 
-                    // Trigger Smart Auto-Responder if enabled and not an automated/SOS message
                     if (_isAutoReplyEnabled.value && !packet.isBroadcast && !txt.startsWith("🤖") && !txt.startsWith("🚨")) {
                         val now = System.currentTimeMillis()
                         val lastSent = autoReplyCooldownMap[packet.sourceNodeId] ?: 0L

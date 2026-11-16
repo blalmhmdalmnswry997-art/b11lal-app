@@ -1,6 +1,10 @@
 package com.example.ui
 
 import android.app.Application
+import android.media.AudioManager
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.media.ToneGenerator
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,12 +16,14 @@ import com.example.mesh.ChatMessage
 import com.example.mesh.PeerNode
 import com.example.nearby.NearbyConnectionsManager
 import com.example.webrtc.WebRtcP2PManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class AppScreen {
@@ -30,23 +36,30 @@ enum class AppScreen {
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    val nearbyManager = NearbyConnectionsManager(application.applicationContext)
-    val webRtcManager = WebRtcP2PManager(application.applicationContext, nearbyManager)
-    val repository = CipherMeshRepository(application.applicationContext, nearbyManager, webRtcManager)
+    private val appContext = application.applicationContext
 
-    // Current Screen
+    val nearbyManager = NearbyConnectionsManager(appContext)
+    val webRtcManager = WebRtcP2PManager(appContext, nearbyManager)
+    val repository = CipherMeshRepository(appContext, nearbyManager, webRtcManager)
+
+    private val nullPeer: PeerNode? = null
+    private val nullChatMessage: ChatMessage? = null
+    private val emptyMsgList = listOfNotNull(nullChatMessage)
+
+    private var activeRingtone: Ringtone? = null
+    private var ringbackJob: Job? = null
+    private var knownMessageIds = setOf("sys-welcome")
+    private var isMessageTrackerInitialized = false
+
     private val _currentScreen = MutableStateFlow(AppScreen.RADAR)
-    val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
+    val currentScreen = _currentScreen.asStateFlow()
 
-    // Safety Verification Dialog
-    private val _peerToVerify = MutableStateFlow<PeerNode?>(null)
-    val peerToVerify: StateFlow<PeerNode?> = _peerToVerify.asStateFlow()
+    private val _peerToVerify = MutableStateFlow(nullPeer)
+    val peerToVerify = _peerToVerify.asStateFlow()
 
-    // Mesh Radar view mode (Radar vs Interactive Graph)
     private val _isGraphView = MutableStateFlow(false)
-    val isGraphView: StateFlow<Boolean> = _isGraphView.asStateFlow()
+    val isGraphView = _isGraphView.asStateFlow()
 
-    // State flows from managers & repository
     val isAdvertising = nearbyManager.isAdvertising
     val isDiscovering = nearbyManager.isDiscovering
     val discoveredPeers = nearbyManager.discoveredPeers
@@ -61,7 +74,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recordingDurationSec = repository.recordingDurationSec
     val playingMessageId = repository.playingMessageId
 
-    // WebRTC call states
     val callState = webRtcManager.callState
     val callType = webRtcManager.callType
     val activePeerName = webRtcManager.activePeerName
@@ -74,29 +86,109 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isVideoMuted = webRtcManager.isVideoMuted
     val isSpeakerOn = webRtcManager.isSpeakerOn
 
-    // Active conversation messages
-    val activeMessages: StateFlow<List<ChatMessage>> = combine(
+    val activeMessages = combine(
         conversations,
         selectedPeerId
     ) { convs, selectedId ->
         if (selectedId != null) {
-            convs[selectedId] ?: emptyList()
+            convs[selectedId] ?: emptyMsgList
         } else {
-            convs["*"] ?: emptyList()
+            convs["*"] ?: emptyMsgList
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMsgList)
 
     init {
-        // Automatically open video call screen when incoming or outgoing call activates
         viewModelScope.launch {
             callState.collect { state ->
-                if (state == CallState.INCOMING_RINGING || state == CallState.OUTGOING_RINGING || state == CallState.CONNECTED) {
-                    _currentScreen.value = AppScreen.VIDEO_CALL
-                } else if (state == CallState.ENDED && _currentScreen.value == AppScreen.VIDEO_CALL) {
-                    _currentScreen.value = AppScreen.CONVERSATION
+                when (state) {
+                    CallState.INCOMING_RINGING -> {
+                        _currentScreen.value = AppScreen.VIDEO_CALL
+                        startIncomingRingtone()
+                    }
+                    CallState.OUTGOING_RINGING -> {
+                        _currentScreen.value = AppScreen.VIDEO_CALL
+                        startOutgoingRingback()
+                    }
+                    CallState.CONNECTED -> {
+                        stopAllCallTones()
+                        _currentScreen.value = AppScreen.VIDEO_CALL
+                    }
+                    CallState.ENDED -> {
+                        stopAllCallTones()
+                        if (_currentScreen.value == AppScreen.VIDEO_CALL) {
+                            _currentScreen.value = AppScreen.CONVERSATION
+                        }
+                    }
+                    CallState.IDLE -> {
+                        stopAllCallTones()
+                    }
                 }
             }
         }
+
+        viewModelScope.launch {
+            conversations.collect { convMap ->
+                val allMsgs = convMap.values.flatten()
+                val currentIds = allMsgs.map { it.id }.toSet()
+
+                if (!isMessageTrackerInitialized) {
+                    knownMessageIds = currentIds
+                    isMessageTrackerInitialized = true
+                } else {
+                    val hasNewIncoming = allMsgs.any { msg ->
+                        !knownMessageIds.contains(msg.id) && !msg.isOutgoing && msg.senderId != "system"
+                    }
+                    knownMessageIds = currentIds
+                    if (hasNewIncoming && callState.value == CallState.IDLE) {
+                        playIncomingMessageAlert()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startIncomingRingtone() {
+        stopAllCallTones()
+        try {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            val ringtone = RingtoneManager.getRingtone(appContext, uri)
+            activeRingtone = ringtone
+            ringtone?.play()
+        } catch (t: Throwable) {}
+    }
+
+    private fun startOutgoingRingback() {
+        stopAllCallTones()
+        ringbackJob = viewModelScope.launch {
+            var toneGen: ToneGenerator? = null
+            try {
+                toneGen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70)
+                while (isActive && callState.value == CallState.OUTGOING_RINGING) {
+                    toneGen.startTone(ToneGenerator.TONE_SUP_RINGTONE, 900)
+                    delay(2500)
+                }
+            } catch (t: Throwable) {
+            } finally {
+                try { toneGen?.release() } catch (t: Throwable) {}
+            }
+        }
+    }
+
+    private fun stopAllCallTones() {
+        ringbackJob?.cancel()
+        ringbackJob = null
+        try {
+            activeRingtone?.stop()
+        } catch (t: Throwable) {}
+        activeRingtone = null
+    }
+
+    private fun playIncomingMessageAlert() {
+        try {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val notif = RingtoneManager.getRingtone(appContext, uri)
+            notif?.play()
+        } catch (t: Throwable) {}
     }
 
     fun navigateTo(screen: AppScreen) {
@@ -183,5 +275,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getLocalFingerprint(): String {
         return CryptoManager.localFingerprint
+    }
+
+    override fun onCleared() {
+        stopAllCallTones()
+        super.onCleared()
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,10 +30,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -78,6 +83,7 @@ fun MeshRadarScreen(
     viewModel: MainViewModel,
     modifier: Modifier = Modifier
 ) {
+    val localNodeName by viewModel.localNodeName.collectAsState()
     val isAdvertising by viewModel.isAdvertising.collectAsState()
     val isDiscovering by viewModel.isDiscovering.collectAsState()
     val discoveredPeers by viewModel.discoveredPeers.collectAsState()
@@ -89,6 +95,8 @@ fun MeshRadarScreen(
     val peerToVerify by viewModel.peerToVerify.collectAsState()
 
     var showDiagnostics by remember { mutableStateOf(false) }
+    var showEditNameDialog by remember { mutableStateOf(false) }
+    var newNameInput by remember(localNodeName) { mutableStateOf(localNodeName) }
 
     val allPeers = remember(discoveredPeers, connectedPeers) {
         val map = discoveredPeers.toMutableMap()
@@ -109,7 +117,7 @@ fun MeshRadarScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
@@ -125,15 +133,53 @@ fun MeshRadarScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Text(
-                    text = "${viewModel.repository.localNodeName} [${viewModel.repository.localNodeId.take(4)}]",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            newNameInput = localNodeName
+                            showEditNameDialog = true
+                        }
+                        .padding(vertical = 2.dp, horizontal = 4.dp)
+                ) {
+                    Text(
+                        text = "$localNodeName [${viewModel.repository.localNodeId.take(4)}]",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "تعديل الاسم",
+                        tint = CyanPrimary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { viewModel.sendSosBroadcast() },
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(RedAlert.copy(alpha = 0.2f))
+                        .border(1.dp, RedAlert, CircleShape)
+                        .testTag("sos_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "نداء طوارئ SOS",
+                        tint = RedAlert
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
                 IconButton(
                     onClick = { viewModel.toggleGraphView() },
                     modifier = Modifier
@@ -148,7 +194,7 @@ fun MeshRadarScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
                 IconButton(
                     onClick = { showDiagnostics = true },
@@ -197,7 +243,7 @@ fun MeshRadarScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(250.dp)
+                .height(240.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF0B1424))
                 .border(1.dp, Color(0xFF1B2F4E), RoundedCornerShape(20.dp)),
@@ -454,7 +500,7 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "يتصل التطبيق تلقائياً بأي جهاز عبر البلوتوث أو الواي فاي المحلي أو الشبكات المرتبطة دون الحاجة لإدخال أي إعدادات.",
+                        text = "اضغط على اسمك في الأعلى لتخصيصه، أو استخدم زر الطوارئ الأحمر لإرسال نداء عاجل لجميع الأجهزة.",
                         color = Color(0xFF536B8D),
                         fontSize = 11.sp,
                         textAlign = TextAlign.Center
@@ -478,6 +524,65 @@ fun MeshRadarScreen(
                         onChatClick = { viewModel.openConversation(peerItem.nodeId) },
                         onVerifyClick = { viewModel.openVerificationDialog(peerItem) }
                     )
+                }
+            }
+        }
+    }
+
+    if (showEditNameDialog) {
+        Dialog(onDismissRequest = { showEditNameDialog = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, CyanPrimary)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "تخصيص اسم جهازك في الشبكة",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "سيظهر هذا الاسم لدى جميع الأجهزة المتصلة بك في الرادار والمحادثات والمكالمات:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = newNameInput,
+                        onValueChange = { newNameInput = it },
+                        singleLine = true,
+                        label = { Text("الاسم الظاهر في الشبكة", color = CyanPrimary) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(
+                            onClick = { showEditNameDialog = false },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("إلغاء", color = Color.LightGray)
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (newNameInput.isNotBlank()) {
+                                    viewModel.updateLocalNodeName(newNameInput)
+                                    showEditNameDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("حفظ وتحديث", color = Color(0xFF001F29), fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
         }
@@ -514,7 +619,7 @@ fun MeshRadarScreen(
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "محرك الشبكة والتوجيه التلقائي",
+                                text = "محرك الشبكة والخصوصية",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
@@ -547,7 +652,7 @@ fun MeshRadarScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "اكتشاف تلقائي متعدد القفزات (حتى 12 قفزة) عبر الشبكات والأسواق بدون إنترنت",
+                            text = "قفل الواي فاي عالي الأداء والتوجيه متعدد القفزات (12 قفزة) نشط",
                             fontSize = 12.sp,
                             color = EmeraldSecure,
                             fontWeight = FontWeight.Bold
@@ -565,7 +670,7 @@ fun MeshRadarScreen(
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        DiagnosticRow("الجهاز المحلي", "${viewModel.repository.localNodeName} (${viewModel.repository.localNodeId})")
+                        DiagnosticRow("اسم الجهاز الحالي", "$localNodeName (${viewModel.repository.localNodeId})")
                         DiagnosticRow("عنوان الشبكة المحلي", viewModel.repository.nearbyManager.getPrimaryLocalIp())
                         DiagnosticRow("آلية الربط", "مسح تلقائي للشبكات + توجيه متعدد القفزات")
                         DiagnosticRow("خوارزمية التشفير", "AES-256-GCM / X25519")
@@ -573,49 +678,30 @@ fun MeshRadarScreen(
                         DiagnosticRow("الحزم المستلمة", "$packetsReceived حزمة تمت معالجتها")
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
-                    Text(
-                        text = "جدول المسارات النشطة",
-                        fontSize = 11.sp,
-                        color = CyanPrimary,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(modifier = Modifier.height(6.dp))
-
-                    if (connectedPeers.isEmpty()) {
-                        Text(
-                            text = "لا توجد عقد متصلة حالياً",
-                            fontSize = 12.sp,
-                            color = Color.Gray
+                    Button(
+                        onClick = {
+                            viewModel.clearAllChats()
+                            showDiagnostics = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = RedAlert),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
                         )
-                    } else {
-                        for (peerItem in connectedPeers.values) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 3.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0xFF0F1A2E))
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(if (peerItem.isDirect) EmeraldSecure else AmberMesh)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "${peerItem.nodeName} • القفزات: ${peerItem.hops}",
-                                    fontSize = 12.sp,
-                                    color = CyanPrimary,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                            }
-                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "مسح الطوارئ (حذف سجل المحادثات بالكامل)",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
                     }
                 }
             }

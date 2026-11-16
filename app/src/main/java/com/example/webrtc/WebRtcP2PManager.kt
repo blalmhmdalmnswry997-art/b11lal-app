@@ -82,7 +82,7 @@ class WebRtcP2PManager(
     private val _bitrateKbps = MutableStateFlow(0)
     val bitrateKbps = _bitrateKbps.asStateFlow()
 
-    private val _rttMs = MutableStateFlow(15)
+    private val _rttMs = MutableStateFlow(14)
     val rttMs = _rttMs.asStateFlow()
 
     private val _remoteVideoBitmap = MutableStateFlow(nullBitmap)
@@ -103,7 +103,18 @@ class WebRtcP2PManager(
     private val _isFrontCamera = MutableStateFlow(true)
     val isFrontCamera = _isFrontCamera.asStateFlow()
 
+    // Walkie-Talkie (Push-To-Talk) States
+    private val _isWalkieTalkieEnabled = MutableStateFlow(true)
+    val isWalkieTalkieEnabled = _isWalkieTalkieEnabled.asStateFlow()
+
+    private val _isPttTransmitting = MutableStateFlow(false)
+    val isPttTransmitting = _isPttTransmitting.asStateFlow()
+
+    private val _isPttReceiving = MutableStateFlow(false)
+    val isPttReceiving = _isPttReceiving.asStateFlow()
+
     private var audioRecordJob: Job? = null
+    private var pttResetJob: Job? = null
     private var audioTrack: AudioTrack? = null
     private var audioRecord: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
@@ -116,21 +127,18 @@ class WebRtcP2PManager(
     private var lastFrameTimestamp = 0L
 
     init {
-        // High-priority non-blocking audio receiver
         scope.launch(Dispatchers.IO) {
             nearbyManager.incomingAudioPackets.collect { packetBytes ->
                 onEncryptedAudioReceived(packetBytes)
             }
         }
 
-        // Video frame receiver on background decoding thread
         scope.launch(Dispatchers.Default) {
             nearbyManager.incomingVideoFrames.collect { frameBytes ->
                 onEncryptedVideoReceived(frameBytes)
             }
         }
 
-        // Live call telemetry updater
         scope.launch {
             while (isActive) {
                 delay(1000)
@@ -148,7 +156,31 @@ class WebRtcP2PManager(
         }
     }
 
+    fun toggleWalkieTalkieMode() {
+        val nextState = !_isWalkieTalkieEnabled.value
+        _isWalkieTalkieEnabled.value = nextState
+        if (!nextState && _isPttTransmitting.value) {
+            stopPttTransmission()
+        }
+    }
+
+    fun startPttTransmission() {
+        if (_callState.value != CallState.IDLE || _isPttTransmitting.value) return
+        _isPttTransmitting.value = true
+        initAudioPlayer()
+        initAudioRecorder()
+    }
+
+    fun stopPttTransmission() {
+        if (!_isPttTransmitting.value) return
+        _isPttTransmitting.value = false
+        if (_callState.value == CallState.IDLE) {
+            releaseAudioRecorder()
+        }
+    }
+
     fun initiateCall(peerNodeId: String, peerName: String, type: CallType) {
+        if (_isPttTransmitting.value) stopPttTransmission()
         _activePeerId.value = peerNodeId
         _activePeerName.value = peerName
         _callType.value = type
@@ -165,6 +197,7 @@ class WebRtcP2PManager(
 
     fun acceptIncomingCall() {
         val peerId = _activePeerId.value ?: return
+        if (_isPttTransmitting.value) stopPttTransmission()
         _callState.value = CallState.CONNECTED
 
         val answer = WebRtcSignalMessage(
@@ -185,6 +218,7 @@ class WebRtcP2PManager(
     }
 
     private fun resetCallSession() {
+        _isPttTransmitting.value = false
         stopCallMedia()
         _callState.value = CallState.ENDED
         _activePeerId.value = null
@@ -287,7 +321,7 @@ class WebRtcP2PManager(
 
             val jpegData = convertProxyToJpeg(imageProxy)
             if (jpegData != null && _callState.value == CallState.CONNECTED) {
-                val peerId = _activePeerId.value
+                val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
                 val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
                 val payload = if (key != null) {
                     try { CryptoManager.encryptAesGcm(jpegData, key) } catch (t: Throwable) { jpegData }
@@ -305,7 +339,7 @@ class WebRtcP2PManager(
     private fun onEncryptedVideoReceived(encryptedBytes: ByteArray) {
         if (_callState.value != CallState.CONNECTED) return
         try {
-            val peerId = _activePeerId.value
+            val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
             val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
             val rawJpeg = if (key != null && encryptedBytes.size in 29..Int.MAX_VALUE) {
                 try {
@@ -332,7 +366,6 @@ class WebRtcP2PManager(
             val srcH = image.height
             if (srcW in 0..15 || srcH in 0..15) return null
 
-            // Subsample by 2 if camera gives high resolution to keep CPU fast
             val step = if (srcW in 640..Int.MAX_VALUE) 2 else 1
             val outW = (srcW / step) and 0xFFFE
             val outH = (srcH / step) and 0xFFFE
@@ -440,8 +473,9 @@ class WebRtcP2PManager(
 
             audioRecordJob = scope.launch(Dispatchers.IO) {
                 val packetBuf = ByteArray(AUDIO_PACKET_BYTES)
-                while (isActive && _callState.value == CallState.CONNECTED) {
-                    if (!_isMicMuted.value) {
+                while (isActive && (_callState.value == CallState.CONNECTED || _isPttTransmitting.value)) {
+                    val shouldSend = (_callState.value == CallState.CONNECTED && !_isMicMuted.value) || _isPttTransmitting.value
+                    if (shouldSend) {
                         var totalRead = 0
                         while (totalRead in 0 until AUDIO_PACKET_BYTES && isActive) {
                             val r = try {
@@ -458,8 +492,12 @@ class WebRtcP2PManager(
 
                         if (totalRead in 1..Int.MAX_VALUE) {
                             val chunk = if (totalRead == AUDIO_PACKET_BYTES) packetBuf.clone() else packetBuf.copyOf(totalRead)
-                            val peerId = _activePeerId.value
-                            val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+                            val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
+                            val key = if (peerId != null && _callState.value == CallState.CONNECTED) {
+                                nearbyManager.getSessionKey(peerId)
+                            } else {
+                                null
+                            }
                             val outBytes = if (key != null) {
                                 try { CryptoManager.encryptAesGcm(chunk, key) } catch (t: Throwable) { chunk }
                             } else {
@@ -488,39 +526,40 @@ class WebRtcP2PManager(
     }
 
     private fun initAudioPlayer() {
-        releaseAudioPlayer()
-        try {
-            val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_OUT, AUDIO_ENCODING)
-            // 1 full second jitter buffer so audio never drops words
-            val trackBufSize = maxOf(minBuf * 3, SAMPLE_RATE * 2)
-
+        synchronized(audioLock) {
+            if (audioTrack != null) return
             try {
-                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                am?.mode = AudioManager.MODE_IN_COMMUNICATION
-                am?.isSpeakerphoneOn = _isSpeakerOn.value
+                val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_OUT, AUDIO_ENCODING)
+                val trackBufSize = maxOf(minBuf * 3, SAMPLE_RATE * 2)
+
+                try {
+                    val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    am?.mode = AudioManager.MODE_IN_COMMUNICATION
+                    am?.isSpeakerphoneOn = _isSpeakerOn.value
+                } catch (t: Throwable) {}
+
+                val track = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AUDIO_ENCODING)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(AUDIO_CHANNEL_OUT)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(trackBufSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+
+                track.play()
+                audioTrack = track
             } catch (t: Throwable) {}
-
-            val track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AUDIO_ENCODING)
-                        .setSampleRate(SAMPLE_RATE)
-                        .setChannelMask(AUDIO_CHANNEL_OUT)
-                        .build()
-                )
-                .setBufferSizeInBytes(trackBufSize)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-
-            track.play()
-            audioTrack = track
-        } catch (t: Throwable) {}
+        }
     }
 
     private fun releaseAudioPlayer() {
@@ -532,12 +571,19 @@ class WebRtcP2PManager(
     }
 
     private fun onEncryptedAudioReceived(encryptedAudio: ByteArray) {
-        if (_callState.value != CallState.CONNECTED) return
+        val inCall = (_callState.value == CallState.CONNECTED)
+        if (!inCall && !_isWalkieTalkieEnabled.value) return
+
+        if (audioTrack == null) {
+            initAudioPlayer()
+        }
         val track = audioTrack ?: return
+
         try {
-            val peerId = _activePeerId.value
+            val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
             val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-            val pcmData = if (key != null && encryptedAudio.size in 29..Int.MAX_VALUE) {
+
+            val pcmData = if (key != null && encryptedAudio.size in (AUDIO_PACKET_BYTES + 1)..Int.MAX_VALUE) {
                 try {
                     CryptoManager.decryptAesGcm(encryptedAudio, key)
                 } catch (t: Throwable) {
@@ -547,12 +593,18 @@ class WebRtcP2PManager(
                 encryptedAudio
             }
 
-            synchronized(audioLock) {
-                if (_callState.value == CallState.CONNECTED) {
-                    // Non-blocking write prevents dropping the next incoming audio packet
-                    track.write(pcmData, 0, pcmData.size, AudioTrack.WRITE_NON_BLOCKING)
-                    byteCounter += encryptedAudio.size
+            if (!inCall) {
+                _isPttReceiving.value = true
+                pttResetJob?.cancel()
+                pttResetJob = scope.launch {
+                    delay(700)
+                    _isPttReceiving.value = false
                 }
+            }
+
+            synchronized(audioLock) {
+                track.write(pcmData, 0, pcmData.size, AudioTrack.WRITE_NON_BLOCKING)
+                byteCounter += encryptedAudio.size
             }
         } catch (t: Throwable) {}
     }

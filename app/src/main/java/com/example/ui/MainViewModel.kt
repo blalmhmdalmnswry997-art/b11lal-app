@@ -87,12 +87,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recordingDurationSec = repository.recordingDurationSec
     val playingMessageId = repository.playingMessageId
 
-    // Exclusive Competitive Features
     val isSelfDestructEnabled = repository.isSelfDestructEnabled
     val isAutoReplyEnabled = repository.isAutoReplyEnabled
     val autoReplyText = repository.autoReplyText
     val appPinCode = repository.appPinCode
     val isAppLocked = repository.isAppLocked
+    val translatedMessages = repository.translatedMessages
+    val pinnedMessages = repository.pinnedMessages
 
     val isWalkieTalkieEnabled = webRtcManager.isWalkieTalkieEnabled
     val isPttTransmitting = webRtcManager.isPttTransmitting
@@ -295,6 +296,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notif?.play()
             }
         } catch (t: Throwable) {}
+    }
+
+    fun editMessageInActiveChat(messageId: String, newText: String) {
+        val peerKey = selectedPeerId.value ?: "*"
+        repository.editMessage(peerKey, messageId, newText)
+    }
+
+    fun deleteMessageInActiveChat(messageId: String) {
+        val peerKey = selectedPeerId.value ?: "*"
+        repository.deleteMessageForEveryone(peerKey, messageId)
+    }
+
+    fun translateMessageToArabic(messageId: String, rawText: String): String {
+        return repository.translateMessageOffline(messageId, rawText)
+    }
+
+    fun pinMessageInActiveChat(messageText: String?) {
+        val peerKey = selectedPeerId.value ?: "*"
+        repository.pinMessageInChat(peerKey, messageText)
     }
 
     fun togglePttTransmission() {

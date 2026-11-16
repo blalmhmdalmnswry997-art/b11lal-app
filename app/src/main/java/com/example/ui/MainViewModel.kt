@@ -1,13 +1,22 @@
 package com.example.ui
 
 import android.app.Application
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
 import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.media.ToneGenerator
 import android.net.Uri
+import android.net.wifi.WifiManager
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.MainActivity
 import com.example.crypto.CryptoManager
 import com.example.data.CipherMeshRepository
 import com.example.mesh.CallState
@@ -48,8 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var activeRingtone: Ringtone? = null
     private var ringbackJob: Job? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var knownMessageIds = setOf("sys-welcome")
     private var isMessageTrackerInitialized = false
+
+    private val channelId = "ciphermesh_alerts_channel"
 
     private val _currentScreen = MutableStateFlow(AppScreen.RADAR)
     val currentScreen = _currentScreen.asStateFlow()
@@ -60,6 +72,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isGraphView = MutableStateFlow(false)
     val isGraphView = _isGraphView.asStateFlow()
 
+    val localNodeName = repository.localNodeNameFlow
     val isAdvertising = nearbyManager.isAdvertising
     val isDiscovering = nearbyManager.isDiscovering
     val discoveredPeers = nearbyManager.discoveredPeers
@@ -98,12 +111,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMsgList)
 
     init {
+        createNotificationChannel()
+        acquireHighPerfWifiLock()
+
         viewModelScope.launch {
             callState.collect { state ->
                 when (state) {
                     CallState.INCOMING_RINGING -> {
                         _currentScreen.value = AppScreen.VIDEO_CALL
                         startIncomingRingtone()
+                        showSystemNotification(
+                            title = "مكالمة مشفرة واردة",
+                            body = "${activePeerName.value} يتصل بك عبر الشبكة المباشرة"
+                        )
                     }
                     CallState.OUTGOING_RINGING -> {
                         _currentScreen.value = AppScreen.VIDEO_CALL
@@ -135,16 +155,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     knownMessageIds = currentIds
                     isMessageTrackerInitialized = true
                 } else {
-                    val hasNewIncoming = allMsgs.any { msg ->
+                    val newIncomingList = allMsgs.filter { msg ->
                         !knownMessageIds.contains(msg.id) && !msg.isOutgoing && msg.senderId != "system"
                     }
                     knownMessageIds = currentIds
-                    if (hasNewIncoming && callState.value == CallState.IDLE) {
-                        playIncomingMessageAlert()
+                    if (newIncomingList.isNotEmpty() && callState.value == CallState.IDLE) {
+                        val latest = newIncomingList.last()
+                        val isSos = latest.text.startsWith("🚨")
+                        playIncomingMessageAlert(isSos)
+                        showSystemNotification(
+                            title = if (isSos) "🚨 نداء طوارئ عاجل من ${latest.senderName}" else "رسالة جديدة من ${latest.senderName}",
+                            body = latest.text
+                        )
                     }
                 }
             }
         }
+    }
+
+    private fun createNotificationChannel() {
+        try {
+            if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Int.MAX_VALUE) {
+                val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                val channel = NotificationChannel(
+                    channelId,
+                    "تنبيهات ومكالمات الشبكة المباشرة",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "إشعارات الرسائل المشفرة ونداءات الطوارئ والمكالمات بدون إنترنت"
+                }
+                nm?.createNotificationChannel(channel)
+            }
+        } catch (t: Throwable) {}
+    }
+
+    private fun showSystemNotification(title: String, body: String) {
+        try {
+            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val intent = Intent(appContext, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingFlags = if (Build.VERSION.SDK_INT in Build.VERSION_CODES.M..Int.MAX_VALUE) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getActivity(appContext, 0, intent, pendingFlags)
+
+            val notification = NotificationCompat.Builder(appContext, channelId)
+                .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            nm.notify((System.currentTimeMillis() % 10000).toInt(), notification)
+        } catch (t: Throwable) {}
+    }
+
+    private fun acquireHighPerfWifiLock() {
+        try {
+            val wm = appContext.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wm != null && wifiLock == null) {
+                @Suppress("DEPRECATION")
+                val lock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "CipherMesh:HighPerfWifiLock")
+                lock.setReferenceCounted(false)
+                lock.acquire()
+                wifiLock = lock
+            }
+        } catch (t: Throwable) {}
+    }
+
+    private fun releaseHighPerfWifiLock() {
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+        } catch (t: Throwable) {}
+        wifiLock = null
     }
 
     private fun startIncomingRingtone() {
@@ -183,12 +273,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         activeRingtone = null
     }
 
-    private fun playIncomingMessageAlert() {
+    private fun playIncomingMessageAlert(isSos: Boolean = false) {
         try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val notif = RingtoneManager.getRingtone(appContext, uri)
-            notif?.play()
+            if (isSos) {
+                val toneGen = ToneGenerator(AudioManager.STREAM_ALARM, 100)
+                toneGen.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 1200)
+            } else {
+                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                val notif = RingtoneManager.getRingtone(appContext, uri)
+                notif?.play()
+            }
         } catch (t: Throwable) {}
+    }
+
+    fun updateLocalNodeName(newName: String) {
+        repository.updateNodeName(newName)
+    }
+
+    fun sendSosBroadcast() {
+        repository.sendSosAlert()
+        repository.selectPeer("*")
+        _currentScreen.value = AppScreen.CONVERSATION
+    }
+
+    fun clearAllChats() {
+        repository.clearAllConversations()
     }
 
     fun navigateTo(screen: AppScreen) {
@@ -279,6 +388,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         stopAllCallTones()
+        releaseHighPerfWifiLock()
         super.onCleared()
     }
 }

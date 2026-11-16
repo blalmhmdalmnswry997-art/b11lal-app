@@ -27,7 +27,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -87,14 +86,14 @@ fun SecurityVerificationDialog(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Security,
-                                contentDescription = "Security",
+                                contentDescription = "الأمان",
                                 tint = CyanPrimary,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "E2EE Key Verification",
+                            text = "توثيق مفاتيح التشفير",
                             style = MaterialTheme.typography.titleMedium,
                             color = Color.White,
                             fontWeight = FontWeight.Bold
@@ -103,7 +102,7 @@ fun SecurityVerificationDialog(
                     IconButton(onClick = onDismiss) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
+                            contentDescription = "إغلاق",
                             tint = Color.Gray
                         )
                     }
@@ -112,7 +111,7 @@ fun SecurityVerificationDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Compare these cryptographic safety numbers with ${peer.nodeName} in person or out-of-band to confirm 100% end-to-end encryption without man-in-the-middle.",
+                    text = "قارن أرقام الأمان المشفرة هذه مع جهاز ${peer.nodeName} للتأكد من أن الاتصال مشفر بالكامل من طرف إلى طرف (AES-256) ومحصن ضد أي اعتراض.",
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF8FA4C4),
                     textAlign = TextAlign.Center
@@ -120,7 +119,6 @@ fun SecurityVerificationDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Safety Blocks Grid
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -132,11 +130,10 @@ fun SecurityVerificationDialog(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "PEER FINGERPRINT",
+                            text = "بصمة تشفير الطرف المتصل",
                             style = MaterialTheme.typography.labelSmall,
                             color = CyanPrimary,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 1.sp
+                            fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
@@ -151,11 +148,10 @@ fun SecurityVerificationDialog(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Text(
-                            text = "LOCAL NODE FINGERPRINT",
+                            text = "بصمة تشفير جهازك المحلي",
                             style = MaterialTheme.typography.labelSmall,
                             color = EmeraldSecure,
-                            fontWeight = FontWeight.SemiBold,
-                            letterSpacing = 1.sp
+                            fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
@@ -171,7 +167,6 @@ fun SecurityVerificationDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Verified status badge
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -191,7 +186,7 @@ fun SecurityVerificationDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isVerified) "Identity Cryptographically Verified" else "Unverified Link",
+                        text = if (isVerified) "تم توثيق هوية المتصل والتشفير بنجاح" else "لم يتم توثيق البصمة يدوياً بعد",
                         fontSize = 12.sp,
                         color = if (isVerified) EmeraldSecure else Color.LightGray,
                         fontWeight = FontWeight.Medium
@@ -215,7 +210,7 @@ fun SecurityVerificationDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isVerified) "Re-Verify Identity" else "Mark as Verified",
+                        text = if (isVerified) "تم التوثيق (تحديث)" else "تأكيد وتوثيق الهوية",
                         color = if (isVerified) Color.LightGray else Color(0xFF00220F),
                         fontWeight = FontWeight.Bold
                     )

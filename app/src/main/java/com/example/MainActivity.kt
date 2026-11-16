@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,11 +27,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -53,7 +49,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -71,7 +66,6 @@ import com.example.ui.screens.MeshRadarScreen
 import com.example.ui.screens.VideoCallScreen
 import com.example.ui.theme.CipherMeshTheme
 import com.example.ui.theme.CyanPrimary
-import com.example.ui.theme.EmeraldSecure
 
 class MainActivity : ComponentActivity() {
 
@@ -91,7 +85,6 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val currentScreen by viewModel.currentScreen.collectAsState()
 
-    // Determine required permissions depending on Android SDK version
     val requiredPermissions = remember {
         val list = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -100,13 +93,13 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
             Manifest.permission.RECORD_AUDIO
         )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.S..Int.MAX_VALUE) {
             list.add(Manifest.permission.BLUETOOTH_SCAN)
             list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             list.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT in Build.VERSION_CODES.TIRAMISU..Int.MAX_VALUE) {
             list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
         }
 
@@ -125,15 +118,12 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
         hasAllPermissions = results.values.all { it }
-        if (hasAllPermissions) {
-            viewModel.startMesh()
-        }
+        viewModel.startMesh()
     }
 
     LaunchedEffect(Unit) {
-        if (hasAllPermissions) {
-            viewModel.startMesh()
-        } else {
+        viewModel.startMesh()
+        if (!hasAllPermissions) {
             permissionLauncher.launch(requiredPermissions)
         }
     }
@@ -153,13 +143,13 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
                         icon = {
                             Icon(
                                 imageVector = Icons.Default.Radar,
-                                contentDescription = "Mesh Radar",
+                                contentDescription = "رادار الشبكة",
                                 modifier = Modifier.size(24.dp)
                             )
                         },
                         label = {
                             Text(
-                                text = "Mesh Radar",
+                                text = "رادار الشبكة",
                                 fontSize = 12.sp,
                                 fontWeight = if (currentScreen == AppScreen.RADAR) FontWeight.Bold else FontWeight.Normal
                             )
@@ -180,13 +170,13 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
                         icon = {
                             Icon(
                                 imageVector = Icons.Default.Chat,
-                                contentDescription = "Chats",
+                                contentDescription = "المحادثات",
                                 modifier = Modifier.size(24.dp)
                             )
                         },
                         label = {
                             Text(
-                                text = "Chats",
+                                text = "المحادثات",
                                 fontSize = 12.sp,
                                 fontWeight = if (currentScreen == AppScreen.CHATS) FontWeight.Bold else FontWeight.Normal
                             )
@@ -219,7 +209,6 @@ fun CipherMeshApp(viewModel: MainViewModel = viewModel()) {
                 }
             }
 
-            // Permission overlay prompt if denied
             if (!hasAllPermissions) {
                 PermissionRequestBanner(
                     onRequestPermissions = { permissionLauncher.launch(requiredPermissions) },
@@ -258,7 +247,7 @@ private fun PermissionRequestBanner(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Offline P2P Mesh Permissions Needed",
+                    text = "مطلوب تفعيل صلاحيات الشبكة المباشرة",
                     style = MaterialTheme.typography.titleSmall,
                     color = Color.White,
                     fontWeight = FontWeight.Bold
@@ -268,7 +257,7 @@ private fun PermissionRequestBanner(
             Spacer(modifier = Modifier.height(6.dp))
 
             Text(
-                text = "CipherMesh requires Bluetooth Low Energy, Nearby Wi-Fi, Camera, and Microphone to discover nearby peers and run encrypted calls without internet.",
+                text = "يحتاج تطبيق CipherMesh إلى صلاحيات البلوتوث والواي فاي القريب والكاميرا والمايكروفون لاكتشاف الأجهزة القريبة وإجراء المكالمات المشفرة بدون إنترنت.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color(0xFF8FA4C4),
                 textAlign = TextAlign.Center
@@ -283,7 +272,7 @@ private fun PermissionRequestBanner(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "Grant Offline Permissions",
+                    text = "منح الصلاحيات وتفعيل الشبكة",
                     color = Color(0xFF001F29),
                     fontWeight = FontWeight.Bold
                 )

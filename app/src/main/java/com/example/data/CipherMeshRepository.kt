@@ -1,5 +1,6 @@
 package com.example.data
 
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -7,6 +8,8 @@ import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
 import com.example.crypto.CryptoManager
@@ -207,9 +210,7 @@ class CipherMeshRepository(
                         root.put(peerKey, arr)
                     }
                     chatsDbFile.writeText(root.toString(), Charsets.UTF_8)
-                } catch (e: Exception) {
-                    Log.e("CipherMeshRepo", "Save DB err: ${e.message}")
-                }
+                } catch (e: Exception) {}
             }
         }
     }
@@ -290,9 +291,7 @@ class CipherMeshRepository(
                     }
                     _conversations.value = loadedMap
                 }
-            } catch (e: Exception) {
-                Log.e("CipherMeshRepo", "Load DB err: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
     }
 
@@ -310,9 +309,7 @@ class CipherMeshRepository(
                         arr.put(obj)
                     }
                     outboxDbFile.writeText(arr.toString(), Charsets.UTF_8)
-                } catch (e: Exception) {
-                    Log.e("CipherMeshRepo", "Save outbox err: ${e.message}")
-                }
+                } catch (e: Exception) {}
             }
         }
     }
@@ -337,9 +334,7 @@ class CipherMeshRepository(
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e("CipherMeshRepo", "Load outbox err: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
     }
 
@@ -477,6 +472,13 @@ class CipherMeshRepository(
             val destFile = File(safeDir, "${header.messageId}_${header.fileName}")
             tempFile.copyTo(destFile, overwrite = true)
 
+            // Auto-save to phone Gallery (MediaStore)
+            if (header.mediaType == MediaType.IMAGE || header.mimeType.contains("image")) {
+                saveImageToGallery(destFile, header.fileName)
+            } else if (header.mediaType == MediaType.VIDEO || header.mimeType.contains("video")) {
+                saveVideoToGallery(destFile, header.fileName)
+            }
+
             val firstPeer = nearbyManager.connectedPeers.value.values.firstOrNull()
             val peerId = _selectedPeerId.value ?: firstPeer?.nodeId ?: "*"
             val msg = ChatMessage(
@@ -499,9 +501,57 @@ class CipherMeshRepository(
                 _conversations.value = _conversations.value + (peerId to (list + msg))
                 saveConversationsToDisk()
             }
-        } catch (e: Exception) {
-            Log.e("CipherMeshRepo", "File err: ${e.message}")
-        }
+        } catch (e: Exception) {}
+    }
+
+    private fun saveImageToGallery(file: File, fileName: String) {
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/CipherMesh")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { inp -> inp.copyTo(out) }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+            }
+        } catch (e: Exception) {}
+    }
+
+    private fun saveVideoToGallery(file: File, fileName: String) {
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/CipherMesh")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { inp -> inp.copyTo(out) }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    values.clear()
+                    values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+            }
+        } catch (e: Exception) {}
     }
 
     fun sendTextMessage(recipientId: String, text: String) {
@@ -552,7 +602,7 @@ class CipherMeshRepository(
             dir.mkdirs()
             val file = File(dir, "vn_${System.currentTimeMillis()}.m4a")
             currentVoiceNoteFile = file
-            mediaRecorder = if (Build.VERSION.SDK_INT in Build.VERSION_CODES.S..Int.MAX_VALUE) {
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context)
             } else {
                 @Suppress("DEPRECATION")
@@ -588,7 +638,7 @@ class CipherMeshRepository(
         try { mediaRecorder?.release() } catch (e: Exception) {}
         mediaRecorder = null
         val file = currentVoiceNoteFile
-        if (file != null && file.exists() && file.length() in 1L..Long.MAX_VALUE) {
+        if (file != null && file.exists() && file.length() > 0L) {
             sendMediaFile(recipientId, file, MediaType.AUDIO_NOTE, file.name, "audio/m4a", duration)
         }
     }
@@ -658,12 +708,10 @@ class CipherMeshRepository(
                         out.close()
                     }
                 }
-                if (permFile.exists() && permFile.length() in 1L..Long.MAX_VALUE) {
+                if (permFile.exists() && permFile.length() > 0L) {
                     sendMediaFile(recipientId, permFile, MediaType.IMAGE, permFile.name, mimeType, 0)
                 }
-            } catch (e: Exception) {
-                Log.e("CipherMeshRepo", "URI err: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
     }
 

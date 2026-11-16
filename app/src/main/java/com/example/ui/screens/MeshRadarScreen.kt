@@ -34,10 +34,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -47,6 +50,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -94,9 +98,24 @@ fun MeshRadarScreen(
     val isGraphView by viewModel.isGraphView.collectAsState()
     val peerToVerify by viewModel.peerToVerify.collectAsState()
 
+    // Exclusive Competitive Features
+    val isWalkieTalkieEnabled by viewModel.isWalkieTalkieEnabled.collectAsState()
+    val isPttTransmitting by viewModel.isPttTransmitting.collectAsState()
+    val isPttReceiving by viewModel.isPttReceiving.collectAsState()
+    val isSelfDestructEnabled by viewModel.isSelfDestructEnabled.collectAsState()
+    val isAutoReplyEnabled by viewModel.isAutoReplyEnabled.collectAsState()
+    val autoReplyText by viewModel.autoReplyText.collectAsState()
+    val appPinCode by viewModel.appPinCode.collectAsState()
+    val isAppLocked by viewModel.isAppLocked.collectAsState()
+
     var showDiagnostics by remember { mutableStateOf(false) }
     var showEditNameDialog by remember { mutableStateOf(false) }
     var newNameInput by remember(localNodeName) { mutableStateOf(localNodeName) }
+    var autoReplyInput by remember(autoReplyText) { mutableStateOf(autoReplyText) }
+    var pinInputConfig by remember(appPinCode) { mutableStateOf(appPinCode) }
+
+    var unlockPinAttempt by remember { mutableStateOf("") }
+    var unlockError by remember { mutableStateOf(false) }
 
     val allPeers = remember(discoveredPeers, connectedPeers) {
         val map = discoveredPeers.toMutableMap()
@@ -106,11 +125,105 @@ fun MeshRadarScreen(
 
     val multiHopCount = allPeers.count { !it.isDirect }
 
+    if (isAppLocked) {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color(0xFF040810))
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, CyanPrimary)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(CircleShape)
+                            .background(CyanPrimary.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = CyanPrimary,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "بوابة الحماية الرقمية",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "أدخل الرمز السري لفتح التطبيق (أو رمز الطوارئ المموه 9911 لمسح السجل تلقائياً):",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8FA4C4),
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    OutlinedTextField(
+                        value = unlockPinAttempt,
+                        onValueChange = {
+                            unlockPinAttempt = it
+                            unlockError = false
+                        },
+                        singleLine = true,
+                        label = { Text("الرمز السري", color = CyanPrimary) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (unlockError) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "الرمز غير صحيح، حاول مرة أخرى",
+                            fontSize = 12.sp,
+                            color = RedAlert,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Button(
+                        onClick = {
+                            val ok = viewModel.tryUnlockApp(unlockPinAttempt)
+                            if (ok) {
+                                unlockPinAttempt = ""
+                                unlockError = false
+                            } else {
+                                unlockError = true
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldSecure),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "فتح القفل",
+                            color = Color(0xFF00220F),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF070D18))
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -121,15 +234,15 @@ fun MeshRadarScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
-                            .size(10.dp)
+                            .size(9.dp)
                             .clip(CircleShape)
                             .background(if (isAdvertising || isDiscovering) EmeraldSecure else RedAlert)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "شبكة اتصال موزعة تلقائية 100% بدون إنترنت",
+                        text = if (isSelfDestructEnabled) "تدمير ذاتي للرسائل (60ث) نشط" else "شبكة اتصال موزعة 100% بدون إنترنت",
                         style = MaterialTheme.typography.labelSmall,
-                        color = EmeraldSecure,
+                        color = if (isSelfDestructEnabled) AmberMesh else EmeraldSecure,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -166,6 +279,7 @@ fun MeshRadarScreen(
                 IconButton(
                     onClick = { viewModel.sendSosBroadcast() },
                     modifier = Modifier
+                        .size(38.dp)
                         .clip(CircleShape)
                         .background(RedAlert.copy(alpha = 0.2f))
                         .border(1.dp, RedAlert, CircleShape)
@@ -174,7 +288,8 @@ fun MeshRadarScreen(
                     Icon(
                         imageVector = Icons.Default.Warning,
                         contentDescription = "نداء طوارئ SOS",
-                        tint = RedAlert
+                        tint = RedAlert,
+                        modifier = Modifier.size(19.dp)
                     )
                 }
 
@@ -183,6 +298,7 @@ fun MeshRadarScreen(
                 IconButton(
                     onClick = { viewModel.toggleGraphView() },
                     modifier = Modifier
+                        .size(38.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF0F1A2E))
                         .testTag("toggle_graph_button")
@@ -190,29 +306,37 @@ fun MeshRadarScreen(
                     Icon(
                         imageVector = if (isGraphView) Icons.Default.Radar else Icons.Default.Hub,
                         contentDescription = "تبديل عرض الشبكة",
-                        tint = CyanPrimary
+                        tint = CyanPrimary,
+                        modifier = Modifier.size(19.dp)
                     )
                 }
 
                 Spacer(modifier = Modifier.width(6.dp))
 
                 IconButton(
-                    onClick = { showDiagnostics = true },
+                    onClick = {
+                        autoReplyInput = autoReplyText
+                        pinInputConfig = appPinCode
+                        showDiagnostics = true
+                    },
                     modifier = Modifier
+                        .size(38.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF0F1A2E))
+                        .border(1.dp, AmberMesh.copy(alpha = 0.5f), CircleShape)
                         .testTag("diagnostics_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Security,
-                        contentDescription = "حالة الشبكة",
-                        tint = AmberMesh
+                        contentDescription = "مركز القيادة والمميزات",
+                        tint = AmberMesh,
+                        modifier = Modifier.size(19.dp)
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -238,12 +362,12 @@ fun MeshRadarScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(240.dp)
+                .height(195.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF0B1424))
                 .border(1.dp, Color(0xFF1B2F4E), RoundedCornerShape(20.dp)),
@@ -406,7 +530,7 @@ fun MeshRadarScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(12.dp)
+                    .padding(10.dp)
             ) {
                 Text(
                     text = if (isGraphView) "مخطط الشبكة متعددة القفزات" else "رادار الاكتشاف التلقائي عبر الشبكات",
@@ -417,7 +541,7 @@ fun MeshRadarScreen(
                 )
 
                 Text(
-                    text = "تشفير AES-256 نشط",
+                    text = if (isAutoReplyEnabled) "الرد الآلي نشط 🤖" else "تشفير AES-256 نشط",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = EmeraldSecure,
@@ -426,7 +550,88 @@ fun MeshRadarScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Walkie-Talkie Live PTT Bar
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(
+                    when {
+                        isPttTransmitting -> RedAlert.copy(alpha = 0.22f)
+                        isPttReceiving -> EmeraldSecure.copy(alpha = 0.22f)
+                        else -> Color(0xFF0F1A2E)
+                    }
+                )
+                .border(
+                    1.dp,
+                    when {
+                        isPttTransmitting -> RedAlert
+                        isPttReceiving -> EmeraldSecure
+                        else -> Color(0xFF1B2F4E)
+                    },
+                    RoundedCornerShape(14.dp)
+                )
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = if (isPttReceiving) Icons.Default.VolumeUp else if (isWalkieTalkieEnabled) Icons.Default.Mic else Icons.Default.MicOff,
+                    contentDescription = null,
+                    tint = when {
+                        isPttTransmitting -> RedAlert
+                        isPttReceiving -> EmeraldSecure
+                        isWalkieTalkieEnabled -> CyanPrimary
+                        else -> Color.Gray
+                    },
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column {
+                    Text(
+                        text = when {
+                            isPttTransmitting -> "جاري بث صوتك مباشرة عبر اللاسلكي..."
+                            isPttReceiving -> "استقبال بث صوتي مباشر الآن..."
+                            isWalkieTalkieEnabled -> "اللاسلكي الفوري (Walkie-Talkie) جاهز"
+                            else -> "جهاز اللاسلكي الفوري متوقف"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "تحدث فوراً بدون رنين مع جميع المتصلين",
+                        fontSize = 9.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                }
+            }
+
+            Button(
+                onClick = { viewModel.togglePttTransmission() },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isPttTransmitting) RedAlert else CyanPrimary
+                ),
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier.height(34.dp)
+            ) {
+                Text(
+                    text = if (isPttTransmitting) "إيقاف البث" else "تحدث مباشر 🎙️",
+                    fontSize = 11.sp,
+                    color = if (isPttTransmitting) Color.White else Color(0xFF001F29),
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -472,7 +677,7 @@ fun MeshRadarScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         if (allPeers.isEmpty()) {
             Box(
@@ -481,7 +686,7 @@ fun MeshRadarScreen(
                     .weight(1f)
                     .clip(RoundedCornerShape(14.dp))
                     .background(Color(0xFF0B1424))
-                    .padding(20.dp),
+                    .padding(16.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -489,18 +694,18 @@ fun MeshRadarScreen(
                         imageVector = Icons.Default.Radar,
                         contentDescription = null,
                         tint = Color(0xFF324867),
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(40.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = "جاري المسح والربط التلقائي عبر الشبكات...",
                         color = Color(0xFF8FA4C4),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "اضغط على اسمك في الأعلى لتخصيصه، أو استخدم زر الطوارئ الأحمر لإرسال نداء عاجل لجميع الأجهزة.",
+                        text = "اضغط على أيقونة الدرع الأصفر في الأعلى لفتح مركز المميزات الخارقة (التدمير الذاتي، الرد الآلي، القفل السري).",
                         color = Color(0xFF536B8D),
                         fontSize = 11.sp,
                         textAlign = TextAlign.Center
@@ -594,32 +799,24 @@ fun MeshRadarScreen(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF1B2F4E))
+                border = androidx.compose.foundation.BorderStroke(1.dp, AmberMesh)
             ) {
-                Column(modifier = Modifier.padding(18.dp)) {
+                Column(modifier = Modifier.padding(16.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(CircleShape)
-                                    .background(AmberMesh.copy(alpha = 0.15f)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Hub,
-                                    contentDescription = null,
-                                    tint = AmberMesh,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = null,
+                                tint = AmberMesh,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "محرك الشبكة والخصوصية",
+                                text = "مركز القيادة والمميزات الحصرية",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
@@ -634,74 +831,169 @@ fun MeshRadarScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
+                    // Feature 1: Self-Destructing Messages
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(EmeraldSecure.copy(alpha = 0.12f))
-                            .padding(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.WifiOff,
-                            contentDescription = null,
-                            tint = EmeraldSecure,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "قفل الواي فاي عالي الأداء والتوجيه متعدد القفزات (12 قفزة) نشط",
-                            fontSize = 12.sp,
-                            color = EmeraldSecure,
-                            fontWeight = FontWeight.Bold
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "الرسائل ذاتية التدمير (60 ثانية)",
+                                fontSize = 12.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "حذف تلقائي للرسائل بعد دقيقة من قراءتها",
+                                fontSize = 10.sp,
+                                color = Color(0xFF8FA4C4)
+                            )
+                        }
+                        Switch(
+                            checked = isSelfDestructEnabled,
+                            onCheckedChange = { viewModel.toggleSelfDestructMode() }
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF070D18))
-                            .border(1.dp, Color(0xFF162540), RoundedCornerShape(12.dp))
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    // Feature 2: Walkie-Talkie Receiver Toggle
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        DiagnosticRow("اسم الجهاز الحالي", "$localNodeName (${viewModel.repository.localNodeId})")
-                        DiagnosticRow("عنوان الشبكة المحلي", viewModel.repository.nearbyManager.getPrimaryLocalIp())
-                        DiagnosticRow("آلية الربط", "مسح تلقائي للشبكات + توجيه متعدد القفزات")
-                        DiagnosticRow("خوارزمية التشفير", "AES-256-GCM / X25519")
-                        DiagnosticRow("الحزم الموجهة", "$packetsForwarded حزمة معاد توجيهها")
-                        DiagnosticRow("الحزم المستلمة", "$packetsReceived حزمة تمت معالجتها")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "استقبال اللاسلكي الفوري (PTT)",
+                                fontSize = 12.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "سماع البث المباشر تلقائياً بدون رنين",
+                                fontSize = 10.sp,
+                                color = Color(0xFF8FA4C4)
+                            )
+                        }
+                        Switch(
+                            checked = isWalkieTalkieEnabled,
+                            onCheckedChange = { viewModel.toggleWalkieTalkieMode() }
+                        )
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                    Button(
-                        onClick = {
-                            viewModel.clearAllChats()
-                            showDiagnostics = false
+                    // Feature 3: Smart Auto-Responder
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "الرد الآلي الذكي بدون إنترنت",
+                                fontSize = 12.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "يرد تلقائياً على من يراسلك وأنت مشغول",
+                                fontSize = 10.sp,
+                                color = Color(0xFF8FA4C4)
+                            )
+                        }
+                        Switch(
+                            checked = isAutoReplyEnabled,
+                            onCheckedChange = { viewModel.saveAutoReplySettings(it, autoReplyInput) }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    OutlinedTextField(
+                        value = autoReplyInput,
+                        onValueChange = {
+                            autoReplyInput = it
+                            viewModel.saveAutoReplySettings(isAutoReplyEnabled, it)
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = RedAlert),
-                        shape = RoundedCornerShape(10.dp),
+                        singleLine = true,
+                        label = { Text("رسالة الرد الآلي", fontSize = 11.sp, color = CyanPrimary) },
                         modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Feature 4: Smart PIN & Duress Code
+                    OutlinedTextField(
+                        value = pinInputConfig,
+                        onValueChange = {
+                            pinInputConfig = it
+                            viewModel.updateAppPin(it)
+                        },
+                        singleLine = true,
+                        label = { Text("رمز قفل التطبيق (اتركه فارغاً لإلغاء القفل)", fontSize = 11.sp, color = AmberMesh) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "مسح الطوارئ (حذف سجل المحادثات بالكامل)",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 12.sp
-                        )
+                        if (appPinCode.isNotEmpty()) {
+                            Button(
+                                onClick = {
+                                    viewModel.lockApp()
+                                    showDiagnostics = false
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = Color(0xFF001F29),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "قفل الآن",
+                                    color = Color(0xFF001F29),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.clearAllChats()
+                                showDiagnostics = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = RedAlert),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "مسح الطوارئ",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
             }
@@ -715,28 +1007,6 @@ fun MeshRadarScreen(
             isVerified = verifiedPeers.contains(verifyPeer.nodeId),
             onVerifyClick = { viewModel.markPeerVerified(verifyPeer.nodeId) },
             onDismiss = { viewModel.closeVerificationDialog() }
-        )
-    }
-}
-
-@Composable
-private fun DiagnosticRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            fontSize = 11.sp,
-            color = Color(0xFF8FA4C4)
-        )
-        Text(
-            text = value,
-            fontSize = 11.sp,
-            color = Color.White,
-            fontFamily = FontFamily.Monospace,
-            fontWeight = FontWeight.SemiBold
         )
     }
 }

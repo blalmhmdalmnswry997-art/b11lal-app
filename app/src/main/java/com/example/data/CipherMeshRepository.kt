@@ -59,12 +59,30 @@ class CipherMeshRepository(
     private val _localNodeNameFlow = MutableStateFlow("")
     val localNodeNameFlow = _localNodeNameFlow.asStateFlow()
 
+    // Exclusive Competitive Features States
+    private val _isSelfDestructEnabled = MutableStateFlow(false)
+    val isSelfDestructEnabled = _isSelfDestructEnabled.asStateFlow()
+
+    private val _isAutoReplyEnabled = MutableStateFlow(false)
+    val isAutoReplyEnabled = _isAutoReplyEnabled.asStateFlow()
+
+    private val _autoReplyText = MutableStateFlow("أنا بعيد عن الهاتف حالياً، وصلتني رسالتك المشفرة عبر الشبكة وسأرد عليك قريباً.")
+    val autoReplyText = _autoReplyText.asStateFlow()
+
+    private val _appPinCode = MutableStateFlow("")
+    val appPinCode = _appPinCode.asStateFlow()
+
+    private val _isAppLocked = MutableStateFlow(false)
+    val isAppLocked = _isAppLocked.asStateFlow()
+
+    private val autoReplyCooldownMap = Collections.synchronizedMap(mutableMapOf("init" to 0L).apply { clear() })
+
     private val welcomeMessage = ChatMessage(
         id = "sys-welcome",
         senderId = "system",
         senderName = "نظام الشبكة",
         recipientId = "*",
-        text = "مرحباً بك في CipherMesh. المحادثات الدائمة والمزامنة الذكية بدون إنترنت نشطة.",
+        text = "مرحباً بك في CipherMesh. المحادثات الدائمة، اللاسلكي الفوري، والمزامنة الذكية بدون إنترنت نشطة.",
         timestamp = System.currentTimeMillis(),
         isOutgoing = false,
         status = MessageStatus.DELIVERED,
@@ -124,6 +142,17 @@ class CipherMeshRepository(
         localNodeName = storedName
         _localNodeNameFlow.value = storedName
 
+        _isSelfDestructEnabled.value = prefs.getBoolean("self_destruct_enabled", false)
+        _isAutoReplyEnabled.value = prefs.getBoolean("auto_reply_enabled", false)
+        val savedAutoReply = prefs.getString("auto_reply_text", null)
+        if (!savedAutoReply.isNullOrBlank()) {
+            _autoReplyText.value = savedAutoReply
+        }
+
+        val savedPin = prefs.getString("app_pin_code", "") ?: ""
+        _appPinCode.value = savedPin
+        _isAppLocked.value = savedPin.isNotEmpty()
+
         loadVerifiedPeersFromPrefs()
         loadConversationsFromDisk()
         loadOutboxFromDisk()
@@ -159,6 +188,82 @@ class CipherMeshRepository(
                 }
             }
         }
+
+        // Self-Destructing Messages Engine (60 seconds TTL)
+        scope.launch {
+            while (isActive) {
+                delay(5000)
+                if (_isSelfDestructEnabled.value) {
+                    purgeExpiredMessages()
+                }
+            }
+        }
+    }
+
+    private fun purgeExpiredMessages() {
+        val now = System.currentTimeMillis()
+        var changed = false
+        val updated = _conversations.value.mapValues { (peerKey, list) ->
+            val filtered = list.filter { msg ->
+                val ageMs = now - msg.timestamp
+                val keep = (msg.id == "sys-welcome") || (ageMs in 0L until 60000L)
+                if (!keep) changed = true
+                keep
+            }
+            if (peerKey == "*" && filtered.isEmpty()) listOf(welcomeMessage) else filtered
+        }
+        if (changed) {
+            _conversations.value = updated
+            saveConversationsToDisk()
+        }
+    }
+
+    fun toggleSelfDestructMode() {
+        val next = !_isSelfDestructEnabled.value
+        _isSelfDestructEnabled.value = next
+        prefs.edit().putBoolean("self_destruct_enabled", next).apply()
+    }
+
+    fun configureAutoReply(enabled: Boolean, messageText: String) {
+        val cleanText = messageText.trim().ifEmpty {
+            "أنا بعيد عن الهاتف حالياً، وصلتني رسالتك المشفرة عبر الشبكة وسأرد عليك قريباً."
+        }
+        _isAutoReplyEnabled.value = enabled
+        _autoReplyText.value = cleanText
+        prefs.edit()
+            .putBoolean("auto_reply_enabled", enabled)
+            .putString("auto_reply_text", cleanText)
+            .apply()
+    }
+
+    fun updatePinCode(newPin: String) {
+        val cleanPin = newPin.trim()
+        _appPinCode.value = cleanPin
+        prefs.edit().putString("app_pin_code", cleanPin).apply()
+        if (cleanPin.isEmpty()) {
+            _isAppLocked.value = false
+        }
+    }
+
+    fun lockAppNow() {
+        if (_appPinCode.value.isNotEmpty()) {
+            _isAppLocked.value = true
+        }
+    }
+
+    fun verifyPinOrDuress(enteredPin: String): Boolean {
+        val clean = enteredPin.trim()
+        // Duress Emergency Stealth Code (9911): Wipes all chats & unlocks cleanly
+        if (clean == "9911") {
+            clearAllConversations()
+            _isAppLocked.value = false
+            return true
+        }
+        if (clean == _appPinCode.value || _appPinCode.value.isEmpty()) {
+            _isAppLocked.value = false
+            return true
+        }
+        return false
     }
 
     fun updateNodeName(newName: String) {
@@ -465,6 +570,19 @@ class CipherMeshRepository(
                 if (list.none { it.id == msg.id }) {
                     _conversations.value = _conversations.value + (convKey to (list + msg))
                     saveConversationsToDisk()
+
+                    // Trigger Smart Auto-Responder if enabled and not an automated/SOS message
+                    if (_isAutoReplyEnabled.value && !packet.isBroadcast && !txt.startsWith("🤖") && !txt.startsWith("🚨")) {
+                        val now = System.currentTimeMillis()
+                        val lastSent = autoReplyCooldownMap[packet.sourceNodeId] ?: 0L
+                        if ((now - lastSent) in 30000L..Long.MAX_VALUE) {
+                            autoReplyCooldownMap[packet.sourceNodeId] = now
+                            scope.launch {
+                                delay(1200)
+                                sendTextMessage(packet.sourceNodeId, "🤖 [رد آلي]: ${_autoReplyText.value}")
+                            }
+                        }
+                    }
                 }
                 if (_selectedPeerId.value == convKey && !packet.isBroadcast) {
                     val readPacket = MeshPacket(

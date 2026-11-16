@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -93,9 +92,11 @@ fun MeshRadarScreen(
 
     val allPeers = remember(discoveredPeers, connectedPeers) {
         val map = discoveredPeers.toMutableMap()
-        connectedPeers.forEach { (k, v) -> map[k] = v }
+        map.putAll(connectedPeers)
         map.values.toList()
     }
+
+    val multiHopCount = allPeers.count { !it.isDirect }
 
     Column(
         modifier = modifier
@@ -118,7 +119,7 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "شبكة اتصال مباشر 100% بدون إنترنت",
+                        text = "شبكة اتصال موزعة تلقائية 100% بدون إنترنت",
                         style = MaterialTheme.typography.labelSmall,
                         color = EmeraldSecure,
                         fontWeight = FontWeight.Bold
@@ -158,7 +159,7 @@ fun MeshRadarScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Security,
-                        contentDescription = "تشخيص الشبكة",
+                        contentDescription = "حالة الشبكة",
                         tint = AmberMesh
                     )
                 }
@@ -172,14 +173,14 @@ fun MeshRadarScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             StatusChip(
-                label = "متصل مباشر",
+                label = "الأجهزة المتصلة",
                 value = "${connectedPeers.size}",
                 color = CyanPrimary,
                 modifier = Modifier.weight(1f)
             )
             StatusChip(
-                label = "الأجهزة المكتشفة",
-                value = "${discoveredPeers.size}",
+                label = "عبر القفزات",
+                value = "$multiHopCount",
                 color = AmberMesh,
                 modifier = Modifier.weight(1f)
             )
@@ -196,7 +197,7 @@ fun MeshRadarScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(260.dp)
+                .height(250.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF0B1424))
                 .border(1.dp, Color(0xFF1B2F4E), RoundedCornerShape(20.dp)),
@@ -224,7 +225,8 @@ fun MeshRadarScreen(
                         center = center
                     )
 
-                    allPeers.forEachIndexed { index, peer ->
+                    for (index in allPeers.indices) {
+                        val peer = allPeers[index]
                         val angle = (index * (360f / maxOf(allPeers.size, 1))) % 360f
                         val rad = Math.toRadians(angle.toDouble())
                         val peerPos = Offset(
@@ -252,7 +254,7 @@ fun MeshRadarScreen(
                             )
                         }
 
-                        val peerColor = if (peer.isConnected) CyanPrimary else AmberMesh
+                        val peerColor = if (peer.isDirect) CyanPrimary else AmberMesh
                         drawCircle(
                             color = peerColor,
                             radius = 7.dp.toPx(),
@@ -329,7 +331,8 @@ fun MeshRadarScreen(
                         style = Stroke(width = 2f)
                     )
 
-                    allPeers.forEachIndexed { index, peer ->
+                    for (index in allPeers.indices) {
+                        val peer = allPeers[index]
                         val peerAngle = (index * (360f / maxOf(allPeers.size, 1)) + 45f) % 360f
                         val peerRad = Math.toRadians(peerAngle.toDouble())
                         val dist = radius * (0.45f + ((index % 3) * 0.2f))
@@ -338,7 +341,7 @@ fun MeshRadarScreen(
                             (center.y + dist * sin(peerRad)).toFloat()
                         )
 
-                        val blipColor = if (peer.isConnected) CyanPrimary else AmberMesh
+                        val blipColor = if (peer.isDirect) CyanPrimary else AmberMesh
                         drawCircle(
                             color = blipColor,
                             radius = 5.dp.toPx(),
@@ -360,7 +363,7 @@ fun MeshRadarScreen(
                     .padding(12.dp)
             ) {
                 Text(
-                    text = if (isGraphView) "مخطط الشبكة: عنقودي مباشر" else "رادار البلوتوث والواي فاي المحلي",
+                    text = if (isGraphView) "مخطط الشبكة متعددة القفزات" else "رادار الاكتشاف التلقائي عبر الشبكات",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFF536B8D),
@@ -377,7 +380,7 @@ fun MeshRadarScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -385,7 +388,7 @@ fun MeshRadarScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "الأجهزة القريبة (${allPeers.size})",
+                text = "الأجهزة والعقد المكتشفة (${allPeers.size})",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF8FA4C4),
                 fontWeight = FontWeight.Bold
@@ -444,14 +447,14 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "جاري البحث عن الأجهزة القريبة...",
+                        text = "جاري المسح والربط التلقائي عبر الشبكات...",
                         color = Color(0xFF8FA4C4),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "تأكد من فتح التطبيق في الأجهزة الأخرى. يعمل عبر البلوتوث أو الواي فاي المحلي بدون إنترنت.",
+                        text = "يتصل التطبيق تلقائياً بأي جهاز عبر البلوتوث أو الواي فاي المحلي أو الشبكات المرتبطة دون الحاجة لإدخال أي إعدادات.",
                         color = Color(0xFF536B8D),
                         fontSize = 11.sp,
                         textAlign = TextAlign.Center
@@ -465,14 +468,14 @@ fun MeshRadarScreen(
                     .weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(allPeers) { peer ->
+                items(allPeers) {
                     PeerNodeCard(
-                        peer = peer,
-                        isVerified = verifiedPeers.contains(peer.nodeId),
-                        onConnectClick = { viewModel.connectToPeer(peer.endpointId) },
-                        onDisconnectClick = { viewModel.disconnectPeer(peer.endpointId) },
-                        onChatClick = { viewModel.openConversation(peer.nodeId) },
-                        onVerifyClick = { viewModel.openVerificationDialog(peer) }
+                        peer = it,
+                        isVerified = verifiedPeers.contains(it.nodeId),
+                        onConnectClick = { viewModel.connectToPeer(it.endpointId) },
+                        onDisconnectClick = { viewModel.disconnectPeer(it.endpointId) },
+                        onChatClick = { viewModel.openConversation(it.nodeId) },
+                        onVerifyClick = { viewModel.openVerificationDialog(it) }
                     )
                 }
             }
@@ -510,7 +513,7 @@ fun MeshRadarScreen(
                             }
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "محرك الشبكة المحلية",
+                                text = "محرك الشبكة والتوجيه التلقائي",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
@@ -543,7 +546,7 @@ fun MeshRadarScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "لا يتطلب إنترنت: وضع الاتصال المباشر والواي فاي المحلي نشط",
+                            text = "اكتشاف تلقائي متعدد القفزات (حتى 12 قفزة) عبر الشبكات والأسواق بدون إنترنت",
                             fontSize = 12.sp,
                             color = EmeraldSecure,
                             fontWeight = FontWeight.Bold
@@ -562,8 +565,8 @@ fun MeshRadarScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         DiagnosticRow("الجهاز المحلي", "${viewModel.repository.localNodeName} (${viewModel.repository.localNodeId})")
-                        DiagnosticRow("نمط الشبكة", "ربط عنقودي مباشر P2P")
-                        DiagnosticRow("طبقة النقل", "بلوتوث + واي فاي مباشر ومحلي")
+                        DiagnosticRow("عنوان الشبكة المحلي", viewModel.repository.nearbyManager.getPrimaryLocalIp())
+                        DiagnosticRow("آلية الربط", "مسح تلقائي للشبكات + توجيه متعدد القفزات")
                         DiagnosticRow("خوارزمية التشفير", "AES-256-GCM / X25519")
                         DiagnosticRow("الحزم الموجهة", "$packetsForwarded حزمة معاد توجيهها")
                         DiagnosticRow("الحزم المستلمة", "$packetsReceived حزمة تمت معالجتها")
@@ -572,7 +575,7 @@ fun MeshRadarScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "جدول التوجيه النشط",
+                        text = "جدول المسارات النشطة",
                         fontSize = 11.sp,
                         color = CyanPrimary,
                         fontWeight = FontWeight.Bold
@@ -582,12 +585,12 @@ fun MeshRadarScreen(
 
                     if (connectedPeers.isEmpty()) {
                         Text(
-                            text = "لا توجد أجهزة متصلة حالياً",
+                            text = "لا توجد عقد متصلة حالياً",
                             fontSize = 12.sp,
                             color = Color.Gray
                         )
                     } else {
-                        connectedPeers.values.forEach { peer ->
+                        connectedPeers.values.forEach {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -601,11 +604,11 @@ fun MeshRadarScreen(
                                     modifier = Modifier
                                         .size(8.dp)
                                         .clip(CircleShape)
-                                        .background(EmeraldSecure)
+                                        .background(if (it.isDirect) EmeraldSecure else AmberMesh)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "${peer.nodeName} • اتصال مباشر (قفزة 1)",
+                                    text = "${it.nodeName} • القفزات: ${it.hops}",
                                     fontSize = 12.sp,
                                     color = CyanPrimary,
                                     fontFamily = FontFamily.Monospace
@@ -618,11 +621,11 @@ fun MeshRadarScreen(
         }
     }
 
-    peerToVerify?.let { peer ->
+    peerToVerify?.let {
         SecurityVerificationDialog(
-            peer = peer,
-            isVerified = verifiedPeers.contains(peer.nodeId),
-            onVerifyClick = { viewModel.markPeerVerified(peer.nodeId) },
+            peer = it,
+            isVerified = verifiedPeers.contains(it.nodeId),
+            onVerifyClick = { viewModel.markPeerVerified(it.nodeId) },
             onDismiss = { viewModel.closeVerificationDialog() }
         )
     }
@@ -717,9 +720,9 @@ private fun PeerNodeCard(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = if (peer.isConnected) Icons.Default.Link else Icons.Default.Wifi,
+                        imageVector = if (peer.isDirect) Icons.Default.Link else Icons.Default.Hub,
                         contentDescription = null,
-                        tint = if (peer.isConnected) CyanPrimary else Color.Gray,
+                        tint = if (peer.isDirect) CyanPrimary else AmberMesh,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -750,9 +753,9 @@ private fun PeerNodeCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (peer.isConnected) "متصل الآن (ارتباط مباشر)" else "متاح للاتصال",
+                            text = if (peer.isDirect) "اتصال مباشر تلقائي (قفزة 1)" else "متصل عبر الشبكة (${peer.hops} قفزات)",
                             fontSize = 11.sp,
-                            color = if (peer.isConnected) EmeraldSecure else Color(0xFF8FA4C4)
+                            color = if (peer.isDirect) EmeraldSecure else AmberMesh
                         )
                         Text(
                             text = "•",

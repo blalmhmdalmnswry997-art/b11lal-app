@@ -10,12 +10,15 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
-import android.util.Log
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -46,12 +49,13 @@ class WebRtcP2PManager(
     private val nearbyManager: NearbyConnectionsManager
 ) {
     companion object {
-        private const val TAG = "WebRtcP2P"
         private const val SAMPLE_RATE = 16000
         private const val AUDIO_CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
-        private const val FRAME_INTERVAL_MS = 100L
+        private const val AUDIO_PACKET_BYTES = 3200
+        private const val VIDEO_INTERVAL_MS = 130L
+        private const val VIDEO_JPEG_QUALITY = 60
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -78,7 +82,7 @@ class WebRtcP2PManager(
     private val _bitrateKbps = MutableStateFlow(0)
     val bitrateKbps = _bitrateKbps.asStateFlow()
 
-    private val _rttMs = MutableStateFlow(18)
+    private val _rttMs = MutableStateFlow(15)
     val rttMs = _rttMs.asStateFlow()
 
     private val _remoteVideoBitmap = MutableStateFlow(nullBitmap)
@@ -102,38 +106,43 @@ class WebRtcP2PManager(
     private var audioRecordJob: Job? = null
     private var audioTrack: AudioTrack? = null
     private var audioRecord: AudioRecord? = null
-    private val audioWriteLock = Any()
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var gainControl: AutomaticGainControl? = null
+    private val audioLock = Any()
 
     private var frameCounter = 0
     private var byteCounter = 0
-    private var lastStatsResetTime = System.currentTimeMillis()
-    private var lastFrameSentTime = 0L
+    private var lastStatsTime = System.currentTimeMillis()
+    private var lastFrameTimestamp = 0L
 
     init {
-        scope.launch(Dispatchers.Default) {
-            nearbyManager.incomingVideoFrames.collect { encryptedFrame ->
-                handleIncomingEncryptedVideoFrame(encryptedFrame)
-            }
-        }
-
+        // High-priority non-blocking audio receiver
         scope.launch(Dispatchers.IO) {
-            nearbyManager.incomingAudioPackets.collect { encryptedAudio ->
-                handleIncomingEncryptedAudioPacket(encryptedAudio)
+            nearbyManager.incomingAudioPackets.collect { packetBytes ->
+                onEncryptedAudioReceived(packetBytes)
             }
         }
 
+        // Video frame receiver on background decoding thread
+        scope.launch(Dispatchers.Default) {
+            nearbyManager.incomingVideoFrames.collect { frameBytes ->
+                onEncryptedVideoReceived(frameBytes)
+            }
+        }
+
+        // Live call telemetry updater
         scope.launch {
             while (isActive) {
                 delay(1000)
                 val now = System.currentTimeMillis()
-                val elapsedMs = now - lastStatsResetTime
-                if (elapsedMs > 0) {
-                    val deltaSec = elapsedMs / 1000.0
-                    _fps.value = (frameCounter / deltaSec).toInt()
-                    _bitrateKbps.value = ((byteCounter * 8) / (deltaSec * 1024)).toInt()
+                val elapsed = now - lastStatsTime
+                if (elapsed in 1L..Long.MAX_VALUE) {
+                    val sec = elapsed / 1000.0
+                    _fps.value = (frameCounter / sec).toInt()
+                    _bitrateKbps.value = ((byteCounter * 8) / (sec * 1024)).toInt()
                     frameCounter = 0
                     byteCounter = 0
-                    lastStatsResetTime = now
+                    lastStatsTime = now
                 }
             }
         }
@@ -146,38 +155,37 @@ class WebRtcP2PManager(
         _isVideoMuted.value = (type == CallType.VOICE)
         _callState.value = CallState.OUTGOING_RINGING
 
-        val signal = WebRtcSignalMessage(
+        val offer = WebRtcSignalMessage(
             type = "OFFER",
-            sdp = "v=0\r\no=OfflinePeer 0 0 IN IP4 127.0.0.1\r\ns=P2P-Encrypted-Call\r\nt=0 0",
+            sdp = "v=0\r\no=CipherMesh 0 0 IN IP4 127.0.0.1\r\ns=DirectCall\r\nt=0 0",
             callType = type
         )
-        sendSignal(peerNodeId, signal)
+        sendSignalPacket(peerNodeId, offer)
     }
 
     fun acceptIncomingCall() {
         val peerId = _activePeerId.value ?: return
         _callState.value = CallState.CONNECTED
 
-        val signal = WebRtcSignalMessage(
+        val answer = WebRtcSignalMessage(
             type = "ANSWER",
-            sdp = "v=0\r\no=OfflinePeer 0 0 IN IP4 127.0.0.1\r\ns=P2P-Encrypted-Call-Answer\r\nt=0 0",
+            sdp = "v=0\r\no=CipherMesh 0 0 IN IP4 127.0.0.1\r\ns=DirectAnswer\r\nt=0 0",
             callType = _callType.value
         )
-        sendSignal(peerId, signal)
-        startMediaEngines()
+        sendSignalPacket(peerId, answer)
+        startCallMedia()
     }
 
     fun rejectOrEndCall() {
         val peerId = _activePeerId.value
         if (peerId != null) {
-            val signal = WebRtcSignalMessage(type = "HANGUP")
-            sendSignal(peerId, signal)
+            sendSignalPacket(peerId, WebRtcSignalMessage(type = "HANGUP"))
         }
-        cleanupCallState()
+        resetCallSession()
     }
 
-    private fun cleanupCallState() {
-        stopMediaEngines()
+    private fun resetCallSession() {
+        stopCallMedia()
         _callState.value = CallState.ENDED
         _activePeerId.value = null
         _remoteVideoBitmap.value = null
@@ -205,82 +213,88 @@ class WebRtcP2PManager(
             "ANSWER" -> {
                 if (_callState.value == CallState.OUTGOING_RINGING) {
                     _callState.value = CallState.CONNECTED
-                    startMediaEngines()
+                    startCallMedia()
                 }
             }
             "HANGUP" -> {
-                cleanupCallState()
+                resetCallSession()
             }
         }
     }
 
-    private fun sendSignal(targetPeerId: String, signal: WebRtcSignalMessage) {
-        val packet = MeshPacket(
+    private fun sendSignalPacket(targetPeerId: String, signal: WebRtcSignalMessage) {
+        val pkt = MeshPacket(
             sourceNodeId = nearbyManager.localNodeId,
             sourceNodeName = nearbyManager.localNodeName,
             destinationNodeId = targetPeerId,
-            ttl = 3,
+            ttl = 6,
             packetType = PacketType.WEBRTC_SIGNAL,
             payloadCiphertext = signal.toJson()
         )
-        nearbyManager.sendMeshPacket(packet)
+        nearbyManager.sendMeshPacket(pkt)
     }
 
-    private fun startMediaEngines() {
-        startAudioPlayback()
-        startAudioRecording()
+    private fun startCallMedia() {
+        initAudioPlayer()
+        initAudioRecorder()
     }
 
-    private fun stopMediaEngines() {
-        stopAudioRecording()
-        stopAudioPlayback()
+    private fun stopCallMedia() {
+        releaseAudioRecorder()
+        releaseAudioPlayer()
     }
 
+    @Suppress("DEPRECATION")
     fun bindCameraCapture(lifecycleOwner: LifecycleOwner) {
-        val hasCameraPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-        if (!hasCameraPerm) return
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
 
         try {
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            cameraProviderFuture.addListener({
+            val future = ProcessCameraProvider.getInstance(context)
+            future.addListener({
                 try {
-                    val cameraProvider = cameraProviderFuture.get()
-                    val cameraSelector = if (_isFrontCamera.value) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+                    val provider = future.get()
+                    val selector = if (_isFrontCamera.value) {
+                        CameraSelector.DEFAULT_FRONT_CAMERA
+                    } else {
+                        CameraSelector.DEFAULT_BACK_CAMERA
+                    }
 
-                    val imageAnalysis = ImageAnalysis.Builder()
+                    val analysis = ImageAnalysis.Builder()
+                        .setTargetResolution(Size(360, 480))
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
 
-                    imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                        processCameraFrame(imageProxy)
+                    analysis.setAnalyzer(cameraExecutor) { proxy ->
+                        encodeAndSendFrame(proxy)
                     }
 
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, imageAnalysis)
+                    provider.unbindAll()
+                    provider.bindToLifecycle(lifecycleOwner, selector, analysis)
                 } catch (t: Throwable) {}
             }, ContextCompat.getMainExecutor(context))
         } catch (t: Throwable) {}
     }
 
-    private fun processCameraFrame(imageProxy: ImageProxy) {
+    private fun encodeAndSendFrame(imageProxy: ImageProxy) {
         try {
             val now = System.currentTimeMillis()
-            if (_isVideoMuted.value || (now - lastFrameSentTime < FRAME_INTERVAL_MS)) {
+            if (_isVideoMuted.value || (now - lastFrameTimestamp) in 0L until VIDEO_INTERVAL_MS) {
                 return
             }
-            lastFrameSentTime = now
+            lastFrameTimestamp = now
 
-            val jpegBytes = imageProxyToJpeg(imageProxy, quality = 35)
-            if (jpegBytes != null && _callState.value == CallState.CONNECTED) {
+            val jpegData = convertProxyToJpeg(imageProxy)
+            if (jpegData != null && _callState.value == CallState.CONNECTED) {
                 val peerId = _activePeerId.value
-                val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-                val frameToSend = if (sessionKey != null) {
-                    try { CryptoManager.encryptAesGcm(jpegBytes, sessionKey) } catch (t: Throwable) { jpegBytes }
+                val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+                val payload = if (key != null) {
+                    try { CryptoManager.encryptAesGcm(jpegData, key) } catch (t: Throwable) { jpegData }
                 } else {
-                    jpegBytes
+                    jpegData
                 }
-                nearbyManager.sendDirectVideoFrame(frameToSend)
+                nearbyManager.sendDirectVideoFrame(payload)
             }
         } catch (t: Throwable) {
         } finally {
@@ -288,169 +302,211 @@ class WebRtcP2PManager(
         }
     }
 
-    private fun handleIncomingEncryptedVideoFrame(encryptedFrame: ByteArray) {
+    private fun onEncryptedVideoReceived(encryptedBytes: ByteArray) {
         if (_callState.value != CallState.CONNECTED) return
         try {
             val peerId = _activePeerId.value
-            val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-            val decryptedBytes = if (sessionKey != null && encryptedFrame.size > 28) {
+            val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+            val rawJpeg = if (key != null && encryptedBytes.size in 29..Int.MAX_VALUE) {
                 try {
-                    CryptoManager.decryptAesGcm(encryptedFrame, sessionKey)
+                    CryptoManager.decryptAesGcm(encryptedBytes, key)
                 } catch (t: Throwable) {
-                    encryptedFrame
+                    encryptedBytes
                 }
             } else {
-                encryptedFrame
+                encryptedBytes
             }
 
-            val bitmap = BitmapFactory.decodeByteArray(decryptedBytes, 0, decryptedBytes.size)
-            if (bitmap != null) {
-                _remoteVideoBitmap.value = bitmap
+            val bmp = BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size)
+            if (bmp != null) {
+                _remoteVideoBitmap.value = bmp
                 frameCounter += 1
-                byteCounter += encryptedFrame.size
+                byteCounter += encryptedBytes.size
             }
         } catch (t: Throwable) {}
     }
 
-    private fun imageProxyToJpeg(image: ImageProxy, quality: Int): ByteArray? {
+    private fun convertProxyToJpeg(image: ImageProxy): ByteArray? {
         try {
-            val width = image.width
-            val height = image.height
-            if (width < 16 || height < 16) return null
+            val srcW = image.width
+            val srcH = image.height
+            if (srcW in 0..15 || srcH in 0..15) return null
+
+            // Subsample by 2 if camera gives high resolution to keep CPU fast
+            val step = if (srcW in 640..Int.MAX_VALUE) 2 else 1
+            val outW = (srcW / step) and 0xFFFE
+            val outH = (srcH / step) and 0xFFFE
+            if (outW in 0..15 || outH in 0..15) return null
 
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
             val vPlane = image.planes[2]
 
-            val yBuffer = yPlane.buffer
-            val uBuffer = uPlane.buffer
-            val vBuffer = vPlane.buffer
+            val yBuf = yPlane.buffer
+            val uBuf = uPlane.buffer
+            val vBuf = vPlane.buffer
 
             val yRowStride = yPlane.rowStride
-            val yPixelStride = yPlane.pixelStride
-            val uvRowStride = uPlane.rowStride
-            val uvPixelStride = uPlane.pixelStride
+            val yPixStride = yPlane.pixelStride
+            val uRowStride = uPlane.rowStride
+            val uPixStride = uPlane.pixelStride
             val vRowStride = vPlane.rowStride
-            val vPixelStride = vPlane.pixelStride
+            val vPixStride = vPlane.pixelStride
 
-            val nv21 = ByteArray(width * height + (width * height) / 2)
-            var pos = 0
+            val nv21 = ByteArray(outW * outH + (outW * outH) / 2)
+            var idx = 0
+            val yLim = yBuf.limit()
 
-            val yLimit = yBuffer.limit()
-            for (row in 0 until height) {
-                val rowStart = row * yRowStride
-                for (col in 0 until width) {
-                    val idx = rowStart + col * yPixelStride
-                    nv21[pos++] = if (idx in 0 until yLimit) yBuffer.get(idx) else 0
+            for (r in 0 until outH) {
+                val srcRow = (r * step) * yRowStride
+                for (c in 0 until outW) {
+                    val pos = srcRow + (c * step) * yPixStride
+                    nv21[idx++] = if (pos in 0 until yLim) yBuf.get(pos) else 0
                 }
             }
 
-            val uvHeight = height / 2
-            val uvWidth = width / 2
-            val uLimit = uBuffer.limit()
-            val vLimit = vBuffer.limit()
+            val uvH = outH / 2
+            val uvW = outW / 2
+            val uLim = uBuf.limit()
+            val vLim = vBuf.limit()
 
-            for (row in 0 until uvHeight) {
-                val uRowStart = row * uvRowStride
-                val vRowStart = row * vRowStride
-                for (col in 0 until uvWidth) {
-                    val uIdx = uRowStart + col * uvPixelStride
-                    val vIdx = vRowStart + col * vPixelStride
-                    nv21[pos++] = if (vIdx in 0 until vLimit) vBuffer.get(vIdx) else 128.toByte()
-                    nv21[pos++] = if (uIdx in 0 until uLimit) uBuffer.get(uIdx) else 128.toByte()
+            for (r in 0 until uvH) {
+                val uRow = (r * step) * uRowStride
+                val vRow = (r * step) * vRowStride
+                for (c in 0 until uvW) {
+                    val uPos = uRow + (c * step) * uPixStride
+                    val vPos = vRow + (c * step) * vPixStride
+                    nv21[idx++] = if (vPos in 0 until vLim) vBuf.get(vPos) else 128.toByte()
+                    nv21[idx++] = if (uPos in 0 until uLim) uBuf.get(uPos) else 128.toByte()
                 }
             }
 
-            val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-            val rawOut = ByteArrayOutputStream()
-            yuvImage.compressToJpeg(Rect(0, 0, width, height), 50, rawOut)
-            val rawBytes = rawOut.toByteArray()
+            val yuvImg = YuvImage(nv21, ImageFormat.NV21, outW, outH, null)
+            val tempStream = ByteArrayOutputStream()
+            yuvImg.compressToJpeg(Rect(0, 0, outW, outH), 75, tempStream)
+            val tempBytes = tempStream.toByteArray()
 
-            val rawBmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return rawBytes
-            val matrix = Matrix()
-            val rot = image.imageInfo.rotationDegrees.toFloat()
-            if (rot != 0f) matrix.postRotate(rot)
-            if (_isFrontCamera.value) matrix.postScale(-1f, 1f)
-            val scale = minOf(200f / rawBmp.width.toFloat(), 250f / rawBmp.height.toFloat(), 1f)
-            matrix.postScale(scale, scale)
+            val decoded = BitmapFactory.decodeByteArray(tempBytes, 0, tempBytes.size) ?: return tempBytes
+            val m = Matrix()
+            val deg = image.imageInfo.rotationDegrees.toFloat()
+            if (deg != 0f) m.postRotate(deg)
+            if (_isFrontCamera.value) m.postScale(-1f, 1f)
 
-            val finalBmp = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, matrix, true)
-            _localVideoBitmap.value = finalBmp
+            val ratio = minOf(320f / decoded.width.toFloat(), 420f / decoded.height.toFloat(), 1f)
+            m.postScale(ratio, ratio)
 
-            val finalOut = ByteArrayOutputStream()
-            finalBmp.compress(Bitmap.CompressFormat.JPEG, quality, finalOut)
-            return finalOut.toByteArray()
+            val finalBitmap = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, true)
+            _localVideoBitmap.value = finalBitmap
+
+            val finalStream = ByteArrayOutputStream()
+            finalBitmap.compress(Bitmap.CompressFormat.JPEG, VIDEO_JPEG_QUALITY, finalStream)
+            return finalStream.toByteArray()
         } catch (t: Throwable) {
             return null
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun startAudioRecording() {
-        stopAudioRecording()
-        val hasAudioPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (!hasAudioPerm) return
+    private fun initAudioRecorder() {
+        releaseAudioRecorder()
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
 
         try {
-            val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_IN, AUDIO_ENCODING)
-            val bufferSize = maxOf(minBufferSize, 2048)
+            val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_IN, AUDIO_ENCODING)
+            val recBufSize = maxOf(minBuf * 2, AUDIO_PACKET_BYTES * 2)
 
-            audioRecord = AudioRecord(
+            val rec = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 SAMPLE_RATE,
                 AUDIO_CHANNEL_IN,
                 AUDIO_ENCODING,
-                bufferSize
+                recBufSize
             )
 
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) return
-            audioRecord?.startRecording()
+            if (rec.state != AudioRecord.STATE_INITIALIZED) return
+
+            try {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    echoCanceler = AcousticEchoCanceler.create(rec.audioSessionId)?.apply { enabled = true }
+                }
+                if (AutomaticGainControl.isAvailable()) {
+                    gainControl = AutomaticGainControl.create(rec.audioSessionId)?.apply { enabled = true }
+                }
+            } catch (t: Throwable) {}
+
+            rec.startRecording()
+            audioRecord = rec
 
             audioRecordJob = scope.launch(Dispatchers.IO) {
-                val buffer = ByteArray(1280)
+                val packetBuf = ByteArray(AUDIO_PACKET_BYTES)
                 while (isActive && _callState.value == CallState.CONNECTED) {
                     if (!_isMicMuted.value) {
-                        val read = try { audioRecord?.read(buffer, 0, buffer.size) ?: 0 } catch (t: Throwable) { 0 }
-                        if (read > 0) {
-                            val peerId = _activePeerId.value
-                            val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-                            val rawChunk = buffer.copyOf(read)
-                            val encryptedAudio = if (sessionKey != null) {
-                                try { CryptoManager.encryptAesGcm(rawChunk, sessionKey) } catch (t: Throwable) { rawChunk }
-                            } else {
-                                rawChunk
+                        var totalRead = 0
+                        while (totalRead in 0 until AUDIO_PACKET_BYTES && isActive) {
+                            val r = try {
+                                rec.read(packetBuf, totalRead, AUDIO_PACKET_BYTES - totalRead)
+                            } catch (t: Throwable) {
+                                -1
                             }
-                            nearbyManager.sendDirectAudioFrame(encryptedAudio)
+                            if (r in 1..Int.MAX_VALUE) {
+                                totalRead += r
+                            } else {
+                                break
+                            }
+                        }
+
+                        if (totalRead in 1..Int.MAX_VALUE) {
+                            val chunk = if (totalRead == AUDIO_PACKET_BYTES) packetBuf.clone() else packetBuf.copyOf(totalRead)
+                            val peerId = _activePeerId.value
+                            val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+                            val outBytes = if (key != null) {
+                                try { CryptoManager.encryptAesGcm(chunk, key) } catch (t: Throwable) { chunk }
+                            } else {
+                                chunk
+                            }
+                            nearbyManager.sendDirectAudioFrame(outBytes)
                         }
                     } else {
-                        delay(20)
+                        delay(40)
                     }
                 }
             }
         } catch (t: Throwable) {}
     }
 
-    private fun stopAudioRecording() {
+    private fun releaseAudioRecorder() {
         audioRecordJob?.cancel()
         audioRecordJob = null
+        try { echoCanceler?.release() } catch (t: Throwable) {}
+        echoCanceler = null
+        try { gainControl?.release() } catch (t: Throwable) {}
+        gainControl = null
         try { audioRecord?.stop() } catch (t: Throwable) {}
         try { audioRecord?.release() } catch (t: Throwable) {}
         audioRecord = null
     }
 
-    private fun startAudioPlayback() {
-        stopAudioPlayback()
+    private fun initAudioPlayer() {
+        releaseAudioPlayer()
         try {
-            val minBufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_OUT, AUDIO_ENCODING)
-            val bufferSize = maxOf(minBufferSize, 4096)
+            val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_OUT, AUDIO_ENCODING)
+            // 1 full second jitter buffer so audio never drops words
+            val trackBufSize = maxOf(minBuf * 3, SAMPLE_RATE * 2)
 
             try {
-                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager?.isSpeakerphoneOn = _isSpeakerOn.value
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                am?.mode = AudioManager.MODE_IN_COMMUNICATION
+                am?.isSpeakerphoneOn = _isSpeakerOn.value
             } catch (t: Throwable) {}
 
-            audioTrack = AudioTrack.Builder()
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AUDIO_ENCODING)
@@ -458,31 +514,32 @@ class WebRtcP2PManager(
                         .setChannelMask(AUDIO_CHANNEL_OUT)
                         .build()
                 )
-                .setBufferSizeInBytes(bufferSize)
+                .setBufferSizeInBytes(trackBufSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            audioTrack?.play()
+            track.play()
+            audioTrack = track
         } catch (t: Throwable) {}
     }
 
-    private fun stopAudioPlayback() {
-        synchronized(audioWriteLock) {
+    private fun releaseAudioPlayer() {
+        synchronized(audioLock) {
             try { audioTrack?.stop() } catch (t: Throwable) {}
             try { audioTrack?.release() } catch (t: Throwable) {}
             audioTrack = null
         }
     }
 
-    private fun handleIncomingEncryptedAudioPacket(encryptedAudio: ByteArray) {
+    private fun onEncryptedAudioReceived(encryptedAudio: ByteArray) {
         if (_callState.value != CallState.CONNECTED) return
         val track = audioTrack ?: return
         try {
             val peerId = _activePeerId.value
-            val sessionKey = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-            val pcmAudio = if (sessionKey != null && encryptedAudio.size > 28) {
+            val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+            val pcmData = if (key != null && encryptedAudio.size in 29..Int.MAX_VALUE) {
                 try {
-                    CryptoManager.decryptAesGcm(encryptedAudio, sessionKey)
+                    CryptoManager.decryptAesGcm(encryptedAudio, key)
                 } catch (t: Throwable) {
                     encryptedAudio
                 }
@@ -490,23 +547,32 @@ class WebRtcP2PManager(
                 encryptedAudio
             }
 
-            synchronized(audioWriteLock) {
+            synchronized(audioLock) {
                 if (_callState.value == CallState.CONNECTED) {
-                    track.write(pcmAudio, 0, pcmAudio.size)
+                    // Non-blocking write prevents dropping the next incoming audio packet
+                    track.write(pcmData, 0, pcmData.size, AudioTrack.WRITE_NON_BLOCKING)
+                    byteCounter += encryptedAudio.size
                 }
             }
         } catch (t: Throwable) {}
     }
 
-    fun toggleMic() { _isMicMuted.value = !_isMicMuted.value }
-    fun toggleVideo() { _isVideoMuted.value = !_isVideoMuted.value }
+    fun toggleMic() {
+        _isMicMuted.value = !_isMicMuted.value
+    }
+
+    fun toggleVideo() {
+        _isVideoMuted.value = !_isVideoMuted.value
+    }
+
     fun toggleSpeaker() {
         _isSpeakerOn.value = !_isSpeakerOn.value
         try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            audioManager?.isSpeakerphoneOn = _isSpeakerOn.value
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.isSpeakerphoneOn = _isSpeakerOn.value
         } catch (t: Throwable) {}
     }
+
     fun toggleCamera(lifecycleOwner: LifecycleOwner) {
         _isFrontCamera.value = !_isFrontCamera.value
         bindCameraCapture(lifecycleOwner)

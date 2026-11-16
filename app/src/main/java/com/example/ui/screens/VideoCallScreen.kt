@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -26,12 +25,9 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -39,16 +35,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -61,6 +63,7 @@ import com.example.ui.theme.AmberMesh
 import com.example.ui.theme.CyanPrimary
 import com.example.ui.theme.EmeraldSecure
 import com.example.ui.theme.RedAlert
+import kotlinx.coroutines.delay
 
 @Composable
 fun VideoCallScreen(
@@ -80,11 +83,38 @@ fun VideoCallScreen(
     val isSpeakerOn by viewModel.isSpeakerOn.collectAsState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    val currentView = LocalView.current
+
+    var callDurationSeconds by remember { mutableStateOf(0) }
+
+    DisposableEffect(currentView) {
+        currentView.keepScreenOn = true
+        onDispose {
+            currentView.keepScreenOn = false
+        }
+    }
 
     LaunchedEffect(callState) {
         if (callState == CallState.CONNECTED || callState == CallState.OUTGOING_RINGING) {
             viewModel.webRtcManager.bindCameraCapture(lifecycleOwner)
         }
+        if (callState == CallState.CONNECTED) {
+            callDurationSeconds = 0
+            while (true) {
+                delay(1000)
+                callDurationSeconds += 1
+            }
+        } else {
+            callDurationSeconds = 0
+        }
+    }
+
+    val formattedDuration = remember(callDurationSeconds) {
+        val mins = callDurationSeconds / 60
+        val secs = callDurationSeconds % 60
+        val mStr = if (mins in 0..9) "0$mins" else "$mins"
+        val sStr = if (secs in 0..9) "0$secs" else "$secs"
+        "$mStr:$sStr"
     }
 
     BackHandler {
@@ -96,12 +126,14 @@ fun VideoCallScreen(
             .fillMaxSize()
             .background(Color(0xFF040810))
     ) {
-        if (remoteBitmap != null && !isVideoMuted && callType == CallType.VIDEO) {
+        val currentRemoteImg = remoteBitmap
+        if (currentRemoteImg != null && callType == CallType.VIDEO) {
             Image(
-                bitmap = remoteBitmap!!.asImageBitmap(),
+                bitmap = currentRemoteImg.asImageBitmap(),
                 contentDescription = "بث الفيديو البعيد",
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.Medium
             )
         } else {
             Column(
@@ -136,36 +168,38 @@ fun VideoCallScreen(
                     fontWeight = FontWeight.Bold
                 )
 
-                Spacer(modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
                     text = when (callState) {
-                        CallState.OUTGOING_RINGING -> "جاري الاتصال عبر شبكة الواي فاي المباشرة..."
+                        CallState.OUTGOING_RINGING -> "جاري الرنين عبر الشبكة المباشرة..."
                         CallState.INCOMING_RINGING -> "مكالمة مشفرة واردة..."
-                        CallState.CONNECTED -> "مكالمة مباشرة مشفرة نشطة"
+                        CallState.CONNECTED -> "متصل الآن • $formattedDuration"
                         else -> "تم إنهاء المكالمة"
                     },
-                    fontSize = 13.sp,
+                    fontSize = 14.sp,
                     color = if (callState == CallState.CONNECTED) EmeraldSecure else AmberMesh,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
 
-        if (localBitmap != null && callType == CallType.VIDEO && !isVideoMuted) {
+        val currentLocalImg = localBitmap
+        if (currentLocalImg != null && callType == CallType.VIDEO && !isVideoMuted) {
             Card(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = 40.dp, end = 16.dp)
-                    .size(width = 110.dp, height = 150.dp),
+                    .size(width = 110.dp, height = 155.dp),
                 shape = RoundedCornerShape(14.dp),
                 border = androidx.compose.foundation.BorderStroke(1.5.dp, CyanPrimary)
             ) {
                 Image(
-                    bitmap = localBitmap!!.asImageBitmap(),
+                    bitmap = currentLocalImg.asImageBitmap(),
                     contentDescription = "معاينة الكاميرا المحلية",
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
+                    contentScale = ContentScale.Crop,
+                    filterQuality = FilterQuality.Medium
                 )
             }
         }
@@ -191,8 +225,8 @@ fun VideoCallScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "تشفير AES-256 بدون إنترنت",
-                    fontSize = 10.sp,
+                    text = if (callState == CallState.CONNECTED) "تشفير AES-256 • $formattedDuration" else "تشفير AES-256 بدون إنترنت",
+                    fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     color = EmeraldSecure,
                     fontWeight = FontWeight.Bold
@@ -211,13 +245,13 @@ fun VideoCallScreen(
                 ) {
                     Column {
                         Text(
-                            text = "الإطارات: $fps  •  السرعة: ${bitrateKbps} كيلوبت/ثا",
+                            text = "الإطارات: $fps  •  السرعة: $bitrateKbps كيلوبت/ثا",
                             fontSize = 10.sp,
                             fontFamily = FontFamily.Monospace,
                             color = CyanPrimary
                         )
                         Text(
-                            text = "التأخير: ${rttMs} ملي ثانية (اتصال مباشر محلي)",
+                            text = "الاستجابة: $rttMs ملي ثانية (بث صوتي ومرئي مباشر)",
                             fontSize = 9.sp,
                             fontFamily = FontFamily.Monospace,
                             color = Color(0xFF8FA4C4)
@@ -244,14 +278,14 @@ fun VideoCallScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "مكالمة واردة",
+                        text = if (callType == CallType.VIDEO) "مكالمة فيديو واردة" else "مكالمة صوتية واردة",
                         style = MaterialTheme.typography.titleMedium,
                         color = Color.White,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "$peerName يتصل بك بدون إنترنت",
+                        text = "$peerName يتصل بك عبر الشبكة المباشرة",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color(0xFF8FA4C4)
                     )

@@ -87,6 +87,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recordingDurationSec = repository.recordingDurationSec
     val playingMessageId = repository.playingMessageId
 
+    // Exclusive Competitive Features
+    val isSelfDestructEnabled = repository.isSelfDestructEnabled
+    val isAutoReplyEnabled = repository.isAutoReplyEnabled
+    val autoReplyText = repository.autoReplyText
+    val appPinCode = repository.appPinCode
+    val isAppLocked = repository.isAppLocked
+
+    val isWalkieTalkieEnabled = webRtcManager.isWalkieTalkieEnabled
+    val isPttTransmitting = webRtcManager.isPttTransmitting
+    val isPttReceiving = webRtcManager.isPttReceiving
+
     val callState = webRtcManager.callState
     val callType = webRtcManager.callType
     val activePeerName = webRtcManager.activePeerName
@@ -284,6 +295,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notif?.play()
             }
         } catch (t: Throwable) {}
+    }
+
+    fun togglePttTransmission() {
+        if (isPttTransmitting.value) {
+            webRtcManager.stopPttTransmission()
+        } else {
+            webRtcManager.startPttTransmission()
+        }
+    }
+
+    fun toggleWalkieTalkieMode() {
+        webRtcManager.toggleWalkieTalkieMode()
+    }
+
+    fun toggleSelfDestructMode() {
+        repository.toggleSelfDestructMode()
+    }
+
+    fun saveAutoReplySettings(enabled: Boolean, replyText: String) {
+        repository.configureAutoReply(enabled, replyText)
+    }
+
+    fun updateAppPin(newPin: String) {
+        repository.updatePinCode(newPin)
+    }
+
+    fun lockApp() {
+        repository.lockAppNow()
+    }
+
+    fun tryUnlockApp(enteredPin: String): Boolean {
+        return repository.verifyPinOrDuress(enteredPin)
     }
 
     fun updateLocalNodeName(newName: String) {

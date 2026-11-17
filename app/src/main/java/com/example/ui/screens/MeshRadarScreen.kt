@@ -93,12 +93,12 @@ fun MeshRadarScreen(
     val discoveredPeers by viewModel.discoveredPeers.collectAsState()
     val connectedPeers by viewModel.connectedPeers.collectAsState()
     val packetsForwarded by viewModel.packetsForwarded.collectAsState()
-    val packetsReceived by viewModel.packetsReceived.collectAsState()
     val verifiedPeers by viewModel.verifiedPeers.collectAsState()
     val isGraphView by viewModel.isGraphView.collectAsState()
     val peerToVerify by viewModel.peerToVerify.collectAsState()
 
-    // Exclusive Competitive Features
+    val isGlobalBridgeConnected by viewModel.isGlobalBridgeConnected.collectAsState()
+
     val isWalkieTalkieEnabled by viewModel.isWalkieTalkieEnabled.collectAsState()
     val isPttTransmitting by viewModel.isPttTransmitting.collectAsState()
     val isPttReceiving by viewModel.isPttReceiving.collectAsState()
@@ -110,6 +110,7 @@ fun MeshRadarScreen(
 
     var showDiagnostics by remember { mutableStateOf(false) }
     var showEditNameDialog by remember { mutableStateOf(false) }
+
     var newNameInput by remember(localNodeName) { mutableStateOf(localNodeName) }
     var autoReplyInput by remember(autoReplyText) { mutableStateOf(autoReplyText) }
     var pinInputConfig by remember(appPinCode) { mutableStateOf(appPinCode) }
@@ -240,9 +241,9 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (isSelfDestructEnabled) "تدمير ذاتي للرسائل (60ث) نشط" else "شبكة اتصال موزعة 100% بدون إنترنت",
+                        text = if (isGlobalBridgeConnected) "🌍 الربط المحلي والدولي التلقائي نشط" else "شبكة اتصال موزعة تلقائية (64 قفزة)",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (isSelfDestructEnabled) AmberMesh else EmeraldSecure,
+                        color = if (isGlobalBridgeConnected) EmeraldSecure else CyanPrimary,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -338,6 +339,51 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        // Zero-Config Automatic Global Bridge Status Banner (No manual buttons or codes needed)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF0F1A2E))
+                .border(
+                    1.dp,
+                    if (isGlobalBridgeConnected) EmeraldSecure.copy(alpha = 0.6f) else CyanPrimary.copy(alpha = 0.35f),
+                    RoundedCornerShape(12.dp)
+                )
+                .padding(horizontal = 12.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (isGlobalBridgeConnected) "🌍 الجسر الدولي الذكي متصل تلقائياً عبر الحدود" else "🌍 المسح التلقائي الشامل (محلي + دولي بدون إعدادات)",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isGlobalBridgeConnected) EmeraldSecure else CyanPrimary
+                )
+                Text(
+                    text = "يربطك تلقائياً بجميع المستخدمين قريباً أو في الدول الأخرى فور فتح التطبيق",
+                    fontSize = 10.sp,
+                    color = Color(0xFF8FA4C4)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (isGlobalBridgeConnected) EmeraldSecure.copy(alpha = 0.2f) else CyanPrimary.copy(alpha = 0.2f))
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = if (isGlobalBridgeConnected) "متصل تلقائياً ✅" else "مسح ذكي 🔄",
+                    fontSize = 10.sp,
+                    color = if (isGlobalBridgeConnected) EmeraldSecure else CyanPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -349,7 +395,7 @@ fun MeshRadarScreen(
                 modifier = Modifier.weight(1f)
             )
             StatusChip(
-                label = "عبر القفزات",
+                label = "عبر القفزات والدول",
                 value = "$multiHopCount",
                 color = AmberMesh,
                 modifier = Modifier.weight(1f)
@@ -362,12 +408,12 @@ fun MeshRadarScreen(
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(195.dp)
+                .height(175.dp)
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF0B1424))
                 .border(1.dp, Color(0xFF1B2F4E), RoundedCornerShape(20.dp)),
@@ -533,7 +579,7 @@ fun MeshRadarScreen(
                     .padding(10.dp)
             ) {
                 Text(
-                    text = if (isGraphView) "مخطط الشبكة متعددة القفزات" else "رادار الاكتشاف التلقائي عبر الشبكات",
+                    text = if (isGraphView) "مخطط الشبكة التلقائية" else "رادار الاكتشاف التلقائي المباشر والدولي",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Color(0xFF536B8D),
@@ -550,7 +596,7 @@ fun MeshRadarScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         // Walkie-Talkie Live PTT Bar
         Row(
@@ -573,7 +619,7 @@ fun MeshRadarScreen(
                     },
                     RoundedCornerShape(14.dp)
                 )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 7.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -598,7 +644,7 @@ fun MeshRadarScreen(
                         text = when {
                             isPttTransmitting -> "جاري بث صوتك مباشرة عبر اللاسلكي..."
                             isPttReceiving -> "استقبال بث صوتي مباشر الآن..."
-                            isWalkieTalkieEnabled -> "اللاسلكي الفوري (Walkie-Talkie) جاهز"
+                            isWalkieTalkieEnabled -> "اللاسلكي الفوري (محلي ودولي) جاهز"
                             else -> "جهاز اللاسلكي الفوري متوقف"
                         },
                         fontSize = 11.sp,
@@ -631,7 +677,7 @@ fun MeshRadarScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -686,7 +732,7 @@ fun MeshRadarScreen(
                     .weight(1f)
                     .clip(RoundedCornerShape(14.dp))
                     .background(Color(0xFF0B1424))
-                    .padding(16.dp),
+                    .padding(14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -694,18 +740,19 @@ fun MeshRadarScreen(
                         imageVector = Icons.Default.Radar,
                         contentDescription = null,
                         tint = Color(0xFF324867),
-                        modifier = Modifier.size(40.dp)
+                        modifier = Modifier.size(36.dp)
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "جاري المسح والربط التلقائي عبر الشبكات...",
+                        text = "جاري البحث والربط التلقائي الشامل...",
                         color = Color(0xFF8FA4C4),
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "اضغط على أيقونة الدرع الأصفر في الأعلى لفتح مركز المميزات الخارقة (التدمير الذاتي، الرد الآلي، القفل السري).",
+                        text = "يتم اكتشاف الأجهزة القريبة والدولية والاتصال بها تلقائياً بالكامل دون الحاجة لأي إعدادات.",
                         color = Color(0xFF536B8D),
                         fontSize = 11.sp,
                         textAlign = TextAlign.Center
@@ -751,7 +798,7 @@ fun MeshRadarScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "سيظهر هذا الاسم لدى جميع الأجهزة المتصلة بك في الرادار والمحادثات والمكالمات:",
+                        text = "سيظهر هذا الاسم تلقائياً لدى جميع الأجهزة المتصلة بك محلياً ودولياً:",
                         fontSize = 12.sp,
                         color = Color(0xFF8FA4C4)
                     )
@@ -833,7 +880,6 @@ fun MeshRadarScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Feature 1: Self-Destructing Messages
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -860,7 +906,6 @@ fun MeshRadarScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Feature 2: Walkie-Talkie Receiver Toggle
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -887,7 +932,6 @@ fun MeshRadarScreen(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // Feature 3: Smart Auto-Responder
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -895,7 +939,7 @@ fun MeshRadarScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "الرد الآلي الذكي بدون إنترنت",
+                                text = "الرد الآلي الذكي",
                                 fontSize = 12.sp,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
@@ -927,7 +971,6 @@ fun MeshRadarScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Feature 4: Smart PIN & Duress Code
                     OutlinedTextField(
                         value = pinInputConfig,
                         onValueChange = {
@@ -1051,6 +1094,8 @@ private fun PeerNodeCard(
     onChatClick: () -> Unit,
     onVerifyClick: () -> Unit
 ) {
+    val isGlobalPeer = peer.endpointId.startsWith("global-") || peer.nodeName.contains("دولي")
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1059,7 +1104,7 @@ private fun PeerNodeCard(
         colors = CardDefaults.cardColors(containerColor = Color(0xFF0F1A2E)),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (peer.isConnected) CyanPrimary.copy(alpha = 0.4f) else Color(0xFF1B2F4E)
+            if (isGlobalPeer) EmeraldSecure.copy(alpha = 0.5f) else if (peer.isConnected) CyanPrimary.copy(alpha = 0.4f) else Color(0xFF1B2F4E)
         )
     ) {
         Row(
@@ -1074,13 +1119,13 @@ private fun PeerNodeCard(
                     modifier = Modifier
                         .size(40.dp)
                         .clip(CircleShape)
-                        .background(if (peer.isConnected) CyanPrimary.copy(alpha = 0.15f) else Color(0xFF162540)),
+                        .background(if (isGlobalPeer) EmeraldSecure.copy(alpha = 0.15f) else if (peer.isConnected) CyanPrimary.copy(alpha = 0.15f) else Color(0xFF162540)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (peer.isDirect) Icons.Default.Link else Icons.Default.Hub,
                         contentDescription = null,
-                        tint = if (peer.isDirect) CyanPrimary else AmberMesh,
+                        tint = if (isGlobalPeer) EmeraldSecure else if (peer.isDirect) CyanPrimary else AmberMesh,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -1111,20 +1156,13 @@ private fun PeerNodeCard(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (peer.isDirect) "اتصال مباشر تلقائي (قفزة 1)" else "متصل عبر الشبكة (${peer.hops} قفزات)",
+                            text = when {
+                                isGlobalPeer -> "متصل تلقائياً عبر الجسر الدولي 🌍"
+                                peer.isDirect -> "اتصال مباشر تلقائي بدون إنترنت (قفزة 1)"
+                                else -> "متصل تلقائياً عبر الشبكة (${peer.hops} قفزات)"
+                            },
                             fontSize = 11.sp,
-                            color = if (peer.isDirect) EmeraldSecure else AmberMesh
-                        )
-                        Text(
-                            text = "•",
-                            fontSize = 11.sp,
-                            color = Color.DarkGray
-                        )
-                        Text(
-                            text = "${peer.signalStrengthDbm} dBm",
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = Color(0xFF536B8D)
+                            color = if (isGlobalPeer || peer.isDirect) EmeraldSecure else AmberMesh
                         )
                     }
                 }

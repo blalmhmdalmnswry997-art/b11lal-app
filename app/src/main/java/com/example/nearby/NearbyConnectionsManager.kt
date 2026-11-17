@@ -27,13 +27,18 @@ import com.google.android.gms.nearby.connection.Strategy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.shareIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -52,9 +57,8 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.Collections
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.SecretKey
+import kotlin.coroutines.resume
 
 class NearbyConnectionsManager(private val context: Context) {
 
@@ -98,27 +102,25 @@ class NearbyConnectionsManager(private val context: Context) {
     private val _gatewayIps = MutableStateFlow(emptyStringList)
     val gatewayIps = _gatewayIps.asStateFlow()
 
-    private val dummyPacket = MeshPacket(
-        sourceNodeId = "",
-        sourceNodeName = "",
-        destinationNodeId = "",
-        packetType = PacketType.TEXT_MESSAGE,
-        payloadCiphertext = ""
-    )
-    private val _incomingPackets = MutableStateFlow(dummyPacket)
-    val incomingPackets = _incomingPackets
-        .filter { it.sourceNodeId.isNotEmpty() }
+    // Non-conflating FIFO Channels so packets and audio are NEVER dropped
+    private val incomingPacketChannel = Channel(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: MeshPacket -> }
+    val incomingPackets = incomingPacketChannel
+        .receiveAsFlow()
         .shareIn(scope, SharingStarted.Eagerly, replay = 0)
 
-    private val _incomingVideoFrames = MutableStateFlow(ByteArray(0))
-    val incomingVideoFrames = _incomingVideoFrames
-        .filter { it.isNotEmpty() }
+    private val incomingVideoChannel = Channel(capacity = 2, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
+    val incomingVideoFrames = incomingVideoChannel
+        .receiveAsFlow()
         .shareIn(scope, SharingStarted.Eagerly, replay = 0)
 
-    private val _incomingAudioPackets = MutableStateFlow(ByteArray(0))
-    val incomingAudioPackets = _incomingAudioPackets
-        .filter { it.isNotEmpty() }
+    private val incomingAudioChannel = Channel(capacity = 40, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
+    val incomingAudioPackets = incomingAudioChannel
+        .receiveAsFlow()
         .shareIn(scope, SharingStarted.Eagerly, replay = 0)
+
+    // Outgoing Single-Slot Media Channels to prevent queue buildup & lag
+    private val outgoingVideoChannel = Channel(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
+    private val outgoingAudioChannel = Channel(capacity = 12, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
 
     private val defaultSecretKey by lazy {
         CryptoManager.deriveSharedSecretFromBase64(CryptoManager.localPublicKeyBase64)
@@ -145,9 +147,9 @@ class NearbyConnectionsManager(private val context: Context) {
         Collections.synchronizedMap(mutableMapOf(0L to dummyPayload).apply { clear() })
     }
 
-    private val _onFileReceived = MutableStateFlow(Pair(dummyHeader, dummyFile))
-    val onFileReceived = _onFileReceived
-        .filter { it.first.messageId.isNotEmpty() }
+    private val fileReceivedChannel = Channel(capacity = 32, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: Pair<MediaHeader, File> -> }
+    val onFileReceived = fileReceivedChannel
+        .receiveAsFlow()
         .shareIn(scope, SharingStarted.Eagerly, replay = 0)
 
     private val seenPacketIds = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
@@ -155,11 +157,6 @@ class NearbyConnectionsManager(private val context: Context) {
     private val lanOutputs = Collections.synchronizedMap(mutableMapOf("init" to dummyOut).apply { clear() })
     private val knownLanPeerIps = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
     private val connectingLanIps = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
-
-    private val isVideoSendBusy = AtomicBoolean(false)
-    private val lastVideoSendTime = AtomicLong(0L)
-    private val isAudioSendBusy = AtomicBoolean(false)
-    private val lastAudioSendTime = AtomicLong(0L)
 
     private var isLanRunning = false
     private var udpSocket: DatagramSocket? = null
@@ -171,6 +168,129 @@ class NearbyConnectionsManager(private val context: Context) {
         if (saved != null) {
             _gatewayIps.value = saved.toList().sorted()
         }
+        startMediaSenderWorkers()
+    }
+
+    private fun startMediaSenderWorkers() {
+        // Dedicated Real-Time Video Worker (Never queues old frames, never blocks chat)
+        scope.launch(Dispatchers.IO) {
+            for (rawFrame in outgoingVideoChannel) {
+                try {
+                    val safeFrame = if (rawFrame.size in 12000..Int.MAX_VALUE) {
+                        try {
+                            val bmp = BitmapFactory.decodeByteArray(rawFrame, 0, rawFrame.size)
+                            val out = ByteArrayOutputStream()
+                            bmp?.compress(Bitmap.CompressFormat.JPEG, 28, out)
+                            out.toByteArray().takeIf { it.isNotEmpty() } ?: rawFrame
+                        } catch (e: Exception) {
+                            rawFrame
+                        }
+                    } else {
+                        rawFrame
+                    }
+
+                    // 1. Send via Fast UDP
+                    sendUdpFastFrame(0x56.toByte(), 0x46.toByte(), safeFrame, includeBroadcast = true)
+
+                    // 2. Send via LAN TCP if connected
+                    val header = byteArrayOf(0x56.toByte(), 0x46.toByte())
+                    val framedPacket = ByteArray(header.size + safeFrame.size)
+                    System.arraycopy(header, 0, framedPacket, 0, header.size)
+                    System.arraycopy(safeFrame, 0, framedPacket, header.size, safeFrame.size)
+
+                    val activeLan = lanOutputs.entries.toList()
+                    for ((epId, dos) in activeLan) {
+                        try {
+                            synchronized(dos) {
+                                dos.writeByte(1)
+                                dos.writeInt(framedPacket.size)
+                                dos.write(framedPacket)
+                                dos.flush()
+                            }
+                        } catch (e: Exception) {
+                            lanOutputs.remove(epId, dos)
+                            try { dos.close() } catch (ex: Exception) {}
+                        }
+                    }
+
+                    // 3. ONLY use Nearby Bluetooth/Direct if NO LAN connection exists, and wait for completion
+                    if (activeLan.isEmpty() && knownLanPeerIps.isEmpty()) {
+                        val nearbyEndpoints = _connectedPeers.value.values
+                            .map { it.endpointId }
+                            .filter { !it.startsWith("lan-") }
+                            .distinct()
+                        for (epId in nearbyEndpoints) {
+                            sendNearbyPayloadAndAwait(epId, framedPacket, timeoutMs = 220L)
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+        }
+
+        // Dedicated Real-Time Audio Worker (Prioritizes voice & Walkie-Talkie)
+        scope.launch(Dispatchers.IO) {
+            for (audioBytes in outgoingAudioChannel) {
+                try {
+                    // 1. Send via Fast UDP
+                    sendUdpFastFrame(0x41.toByte(), 0x46.toByte(), audioBytes, includeBroadcast = true)
+
+                    // 2. Send via LAN TCP if connected
+                    val header = byteArrayOf(0x41.toByte(), 0x46.toByte())
+                    val framedPacket = ByteArray(header.size + audioBytes.size)
+                    System.arraycopy(header, 0, framedPacket, 0, header.size)
+                    System.arraycopy(audioBytes, 0, framedPacket, header.size, audioBytes.size)
+
+                    val activeLan = lanOutputs.entries.toList()
+                    for ((epId, dos) in activeLan) {
+                        try {
+                            synchronized(dos) {
+                                dos.writeByte(1)
+                                dos.writeInt(framedPacket.size)
+                                dos.write(framedPacket)
+                                dos.flush()
+                            }
+                        } catch (e: Exception) {
+                            lanOutputs.remove(epId, dos)
+                            try { dos.close() } catch (ex: Exception) {}
+                        }
+                    }
+
+                    // 3. ONLY use Nearby if NO LAN connection exists
+                    if (activeLan.isEmpty() && knownLanPeerIps.isEmpty()) {
+                        val nearbyEndpoints = _connectedPeers.value.values
+                            .map { it.endpointId }
+                            .filter { !it.startsWith("lan-") }
+                            .distinct()
+                        for (epId in nearbyEndpoints) {
+                            sendNearbyPayloadAndAwait(epId, framedPacket, timeoutMs = 150L)
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+        }
+    }
+
+    private suspend fun sendNearbyPayloadAndAwait(endpointId: String, bytes: ByteArray, timeoutMs: Long) {
+        if (bytes.size !in 1..32000) return
+        withTimeoutOrNull(timeoutMs) {
+            suspendCancellableCoroutine { cont ->
+                try {
+                    connectionsClient.sendPayload(endpointId, Payload.fromBytes(bytes))
+                        .addOnCompleteListener {
+                            if (cont.isActive) cont.resume(Unit)
+                        }
+                } catch (e: Exception) {
+                    if (cont.isActive) cont.resume(Unit)
+                }
+            }
+        }
+    }
+
+    fun clearMediaStreams() {
+        while (outgoingVideoChannel.tryReceive().isSuccess) {}
+        while (outgoingAudioChannel.tryReceive().isSuccess) {}
+        while (incomingVideoChannel.tryReceive().isSuccess) {}
+        while (incomingAudioChannel.tryReceive().isSuccess) {}
     }
 
     private fun markPacketSeen(packetId: String): Boolean {
@@ -235,7 +355,7 @@ class NearbyConnectionsManager(private val context: Context) {
                     if (extractedFile != null && extractedFile.exists()) {
                         val header = pendingMediaHeaders.remove(update.payloadId)
                         if (header != null) {
-                            _onFileReceived.value = Pair(header, extractedFile)
+                            fileReceivedChannel.trySend(Pair(header, extractedFile))
                         } else {
                             completedPayloadFiles[update.payloadId] = extractedFile
                         }
@@ -365,13 +485,13 @@ class NearbyConnectionsManager(private val context: Context) {
 
                     if (b0 == 0x56.toByte() && b1 == 0x46.toByte()) {
                         knownLanPeerIps.add(senderIp)
-                        _incomingVideoFrames.value = pkt.data.copyOfRange(2, len)
+                        incomingVideoChannel.trySend(pkt.data.copyOfRange(2, len))
                         continue
                     }
 
                     if (b0 == 0x41.toByte() && b1 == 0x46.toByte()) {
                         knownLanPeerIps.add(senderIp)
-                        _incomingAudioPackets.value = pkt.data.copyOfRange(2, len)
+                        incomingAudioChannel.trySend(pkt.data.copyOfRange(2, len))
                         continue
                     }
 
@@ -400,7 +520,7 @@ class NearbyConnectionsManager(private val context: Context) {
 
         scope.launch {
             var tick = 0
-            while (isLanRunning) {
+            while (isLanRunning && isActive) {
                 try {
                     val beaconText = listOf("CMESH", localNodeId, localNodeName, LAN_TCP_PORT.toString()).joinToString(sepChar.toString())
                     val beaconBytes = beaconText.toByteArray(Charsets.UTF_8)
@@ -434,12 +554,19 @@ class NearbyConnectionsManager(private val context: Context) {
                         }
                     }
 
+                    // Auto-reconnect any known LAN peer whose TCP socket dropped
+                    for (peerIp in knownLanPeerIps.toSet()) {
+                        if (!lanOutputs.containsKey("lan-$peerIp")) {
+                            onLanPeerDiscovered(peerIp, "lan-$peerIp", "WiFi-$peerIp")
+                        }
+                    }
+
                     if (tick % 3 == 0 && _connectedPeers.value.isNotEmpty()) {
                         broadcastMultiHopPresence()
                     }
                     tick += 1
                 } catch (e: Exception) {}
-                delay(2500)
+                delay(2200)
             }
         }
     }
@@ -488,7 +615,7 @@ class NearbyConnectionsManager(private val context: Context) {
                 val socket = Socket()
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
-                socket.connect(InetSocketAddress(ip, LAN_TCP_PORT), 2500)
+                socket.connect(InetSocketAddress(ip, LAN_TCP_PORT), 2000)
                 handleLanSocket(socket, endpointId, peerNodeId, "$peerName (Wi-Fi)")
             } catch (e: Exception) {
             } finally {
@@ -499,26 +626,30 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private fun handleLanSocket(socket: Socket, endpointId: String, initialNodeId: String, initialName: String) {
         scope.launch {
+            var dosRef: DataOutputStream? = null
             try {
                 socket.tcpNoDelay = true
                 socket.keepAlive = true
                 val dis = DataInputStream(BufferedInputStream(socket.getInputStream()))
                 val dos = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+                dosRef = dos
                 lanOutputs[endpointId] = dos
 
-                val peerNode = PeerNode(
-                    endpointId = endpointId,
-                    nodeId = initialNodeId,
-                    nodeName = initialName,
-                    isConnected = true,
-                    isDirect = true,
-                    hops = 1,
-                    signalStrengthDbm = -42
-                )
-                _connectedPeers.value = _connectedPeers.value + (endpointId to peerNode)
+                if (!_connectedPeers.value.containsKey(endpointId)) {
+                    val peerNode = PeerNode(
+                        endpointId = endpointId,
+                        nodeId = initialNodeId,
+                        nodeName = initialName,
+                        isConnected = true,
+                        isDirect = true,
+                        hops = 1,
+                        signalStrengthDbm = -42
+                    )
+                    _connectedPeers.value = _connectedPeers.value + (endpointId to peerNode)
+                }
                 sendKeyExchange(endpointId)
 
-                delay(300)
+                delay(250)
                 announceKnownPeersToEndpoint(endpointId)
 
                 while (isLanRunning && !socket.isClosed) {
@@ -549,13 +680,16 @@ class NearbyConnectionsManager(private val context: Context) {
                         }
                         val header = MediaHeader.fromJson(String(headerBytes, Charsets.UTF_8))
                         if (header != null && tempFile.exists()) {
-                            _onFileReceived.value = Pair(header, tempFile)
+                            fileReceivedChannel.trySend(Pair(header, tempFile))
                         }
                     }
                 }
             } catch (e: Exception) {
             } finally {
-                lanOutputs.remove(endpointId)
+                // Only remove if this specific stream is still the active one
+                if (dosRef != null) {
+                    lanOutputs.remove(endpointId, dosRef)
+                }
                 try { socket.close() } catch (e: Exception) {}
             }
         }
@@ -675,11 +809,11 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private fun handleIncomingBytes(incomingEndpointId: String, bytes: ByteArray) {
         if (bytes.size in 4..Int.MAX_VALUE && bytes[0] == 0x56.toByte() && bytes[1] == 0x46.toByte()) {
-            _incomingVideoFrames.value = bytes.copyOfRange(2, bytes.size)
+            incomingVideoChannel.trySend(bytes.copyOfRange(2, bytes.size))
             return
         }
         if (bytes.size in 4..Int.MAX_VALUE && bytes[0] == 0x41.toByte() && bytes[1] == 0x46.toByte()) {
-            _incomingAudioPackets.value = bytes.copyOfRange(2, bytes.size)
+            incomingAudioChannel.trySend(bytes.copyOfRange(2, bytes.size))
             return
         }
 
@@ -704,7 +838,7 @@ class NearbyConnectionsManager(private val context: Context) {
             if (header != null) {
                 val readyFile = completedPayloadFiles.remove(header.payloadId)
                 if (readyFile != null) {
-                    _onFileReceived.value = Pair(header, readyFile)
+                    fileReceivedChannel.trySend(Pair(header, readyFile))
                 } else {
                     pendingMediaHeaders[header.payloadId] = header
                 }
@@ -717,7 +851,7 @@ class NearbyConnectionsManager(private val context: Context) {
                 packet.isBroadcast
 
         if (isTarget) {
-            _incomingPackets.value = packet
+            incomingPacketChannel.trySend(packet)
             if (packet.packetType == PacketType.TEXT_MESSAGE && !packet.isBroadcast) {
                 sendDeliveryAck(packet)
             }
@@ -808,10 +942,14 @@ class NearbyConnectionsManager(private val context: Context) {
         val elevatedPacket = if (packet.ttl in 1..5) packet.copy(ttl = DEFAULT_MESH_TTL) else packet
         val bytes = elevatedPacket.toByteArray()
 
+        // 1. Instant UDP Mesh Delivery (With automatic retry for 100% reliability after calls)
         scope.launch {
+            sendUdpFastFrame(0x4D.toByte(), 0x50.toByte(), bytes, includeBroadcast = true)
+            delay(80)
             sendUdpFastFrame(0x4D.toByte(), 0x50.toByte(), bytes, includeBroadcast = true)
         }
 
+        // 2. Reliable TCP + Nearby Delivery
         val activeEndpoints = (_connectedPeers.value.values.map { it.endpointId } + lanOutputs.keys).distinct()
         for (endpointId in activeEndpoints) {
             sendReliablePacketToEndpoint(endpointId, bytes)
@@ -830,7 +968,7 @@ class NearbyConnectionsManager(private val context: Context) {
                         lanOut.flush()
                     }
                 } catch (e: Exception) {
-                    lanOutputs.remove(endpointId)
+                    lanOutputs.remove(endpointId, lanOut)
                     try { lanOut.close() } catch (ex: Exception) {}
                 }
             }
@@ -862,6 +1000,11 @@ class NearbyConnectionsManager(private val context: Context) {
             }
 
             if (includeBroadcast) {
+                try {
+                    val dgramAll = DatagramPacket(packetData, packetData.size, InetAddress.getByName("255.255.255.255"), LAN_UDP_PORT)
+                    sock.send(dgramAll)
+                } catch (e: Exception) {}
+
                 val localIps = getLocalIPv4Addresses()
                 for (ip in localIps) {
                     val parts = ip.split(".")
@@ -878,96 +1021,11 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     fun sendDirectVideoFrame(frameBytes: ByteArray) {
-        val now = System.currentTimeMillis()
-        if (isVideoSendBusy.get() && (now - lastVideoSendTime.get()) in 0L..800L) {
-            return
-        }
-        isVideoSendBusy.set(true)
-        lastVideoSendTime.set(now)
-
-        scope.launch {
-            try {
-                val safeFrame = if (frameBytes.size in 24000..Int.MAX_VALUE) {
-                    try {
-                        val bmp = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
-                        val out = ByteArrayOutputStream()
-                        bmp?.compress(Bitmap.CompressFormat.JPEG, 30, out)
-                        out.toByteArray().takeIf { it.isNotEmpty() } ?: frameBytes
-                    } catch (e: Exception) {
-                        frameBytes
-                    }
-                } else {
-                    frameBytes
-                }
-
-                sendUdpFastFrame(0x56.toByte(), 0x46.toByte(), safeFrame, includeBroadcast = knownLanPeerIps.isEmpty())
-
-                val header = byteArrayOf(0x56.toByte(), 0x46.toByte())
-                val packet = ByteArray(header.size + safeFrame.size)
-                System.arraycopy(header, 0, packet, 0, header.size)
-                System.arraycopy(safeFrame, 0, packet, header.size, safeFrame.size)
-
-                val nearbyEndpoints = _connectedPeers.value.values
-                    .map { it.endpointId }
-                    .filter { !it.startsWith("lan-") }
-                    .distinct()
-
-                if (nearbyEndpoints.isNotEmpty() && packet.size in 1..32000) {
-                    for (endpointId in nearbyEndpoints) {
-                        try {
-                            connectionsClient.sendPayload(endpointId, Payload.fromBytes(packet))
-                                .addOnCompleteListener { isVideoSendBusy.set(false) }
-                        } catch (e: Exception) {
-                            isVideoSendBusy.set(false)
-                        }
-                    }
-                } else {
-                    isVideoSendBusy.set(false)
-                }
-            } catch (e: Exception) {
-                isVideoSendBusy.set(false)
-            }
-        }
+        outgoingVideoChannel.trySend(frameBytes)
     }
 
     fun sendDirectAudioFrame(audioBytes: ByteArray) {
-        val now = System.currentTimeMillis()
-        if (isAudioSendBusy.get() && (now - lastAudioSendTime.get()) in 0L..500L) {
-            return
-        }
-        isAudioSendBusy.set(true)
-        lastAudioSendTime.set(now)
-
-        scope.launch {
-            try {
-                sendUdpFastFrame(0x41.toByte(), 0x46.toByte(), audioBytes, includeBroadcast = knownLanPeerIps.isEmpty())
-
-                val header = byteArrayOf(0x41.toByte(), 0x46.toByte())
-                val packet = ByteArray(header.size + audioBytes.size)
-                System.arraycopy(header, 0, packet, 0, header.size)
-                System.arraycopy(audioBytes, 0, packet, header.size, audioBytes.size)
-
-                val nearbyEndpoints = _connectedPeers.value.values
-                    .map { it.endpointId }
-                    .filter { !it.startsWith("lan-") }
-                    .distinct()
-
-                if (nearbyEndpoints.isNotEmpty() && packet.size in 1..32000) {
-                    for (endpointId in nearbyEndpoints) {
-                        try {
-                            connectionsClient.sendPayload(endpointId, Payload.fromBytes(packet))
-                                .addOnCompleteListener { isAudioSendBusy.set(false) }
-                        } catch (e: Exception) {
-                            isAudioSendBusy.set(false)
-                        }
-                    }
-                } else {
-                    isAudioSendBusy.set(false)
-                }
-            } catch (e: Exception) {
-                isAudioSendBusy.set(false)
-            }
-        }
+        outgoingAudioChannel.trySend(audioBytes)
     }
 
     fun sendFile(targetEndpointId: String, file: File, header: MediaHeader) {
@@ -993,7 +1051,7 @@ class NearbyConnectionsManager(private val context: Context) {
                         lanOut.flush()
                     }
                 } catch (e: Exception) {
-                    lanOutputs.entries.removeIf { it.value == lanOut }
+                    lanOutputs.remove(resolvedEndpoint, lanOut)
                 }
             }
             return

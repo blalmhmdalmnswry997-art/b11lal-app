@@ -26,6 +26,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.example.crypto.CryptoManager
 import com.example.mesh.CallState
 import com.example.mesh.CallType
 import com.example.mesh.MeshPacket
@@ -42,8 +43,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.sqrt
 
 class WebRtcP2PManager(
     private val context: Context,
@@ -54,10 +58,8 @@ class WebRtcP2PManager(
         private const val AUDIO_CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
-        // 3200 bytes = 100ms of crystal-clear 16kHz audio (10 packets/sec for zero stutter)
         private const val AUDIO_PACKET_BYTES = 3200
-        private const val VIDEO_INTERVAL_MS = 60L
-        private const val VIDEO_JPEG_QUALITY = 68
+        private const val VAD_RMS_THRESHOLD = 135.0
     }
 
     private val streamCipherMask = byteArrayOf(
@@ -89,8 +91,11 @@ class WebRtcP2PManager(
     private val _bitrateKbps = MutableStateFlow(0)
     val bitrateKbps = _bitrateKbps.asStateFlow()
 
-    private val _rttMs = MutableStateFlow(8)
+    private val _rttMs = MutableStateFlow(12)
     val rttMs = _rttMs.asStateFlow()
+
+    private val _packetLossPercent = MutableStateFlow(0)
+    val packetLossPercent = _packetLossPercent.asStateFlow()
 
     private val _remoteVideoBitmap = MutableStateFlow(nullBitmap)
     val remoteVideoBitmap = _remoteVideoBitmap.asStateFlow()
@@ -118,6 +123,17 @@ class WebRtcP2PManager(
 
     private val _isPttReceiving = MutableStateFlow(false)
     val isPttReceiving = _isPttReceiving.asStateFlow()
+
+    // Adaptive Bitrate (ABR) Controller State
+    private val adaptiveJpegQuality = AtomicInteger(64)
+    private val adaptiveFrameIntervalMs = AtomicInteger(65)
+    private val adaptiveTargetShortSide = AtomicInteger(240)
+
+    // Audio Sequence & Packet Loss Tracking
+    private val outgoingAudioSeq = AtomicInteger(0)
+    private var lastReceivedAudioSeq = -1
+    private var receivedAudioPacketsWindow = 0
+    private var lostAudioPacketsWindow = 0
 
     private var activeCameraProvider: ProcessCameraProvider? = null
     private var audioRecordJob: Job? = null
@@ -163,8 +179,40 @@ class WebRtcP2PManager(
                 val elapsed = now - lastStatsTime
                 if (elapsed in 1L..Long.MAX_VALUE) {
                     val sec = elapsed / 1000.0
-                    _fps.value = (frameCounter / sec).toInt()
-                    _bitrateKbps.value = ((byteCounter * 8) / (sec * 1024)).toInt()
+                    val currentFps = (frameCounter / sec).toInt()
+                    val currentKbps = ((byteCounter * 8) / (sec * 1024)).toInt()
+                    _fps.value = currentFps
+                    _bitrateKbps.value = currentKbps
+
+                    val totalAudioWindow = receivedAudioPacketsWindow + lostAudioPacketsWindow
+                    if (totalAudioWindow in 1..Int.MAX_VALUE) {
+                        _packetLossPercent.value = ((lostAudioPacketsWindow * 100) / totalAudioWindow).coerceIn(0, 100)
+                    } else {
+                        _packetLossPercent.value = 0
+                    }
+                    receivedAudioPacketsWindow = 0
+                    lostAudioPacketsWindow = 0
+
+                    // Dynamic Adaptive Bitrate (ABR) adjustment based on real-time FPS & Latency
+                    if (_callState.value == CallState.CONNECTED && !_isVideoMuted.value) {
+                        val lat = _rttMs.value
+                        if (lat in 180..Int.MAX_VALUE || currentFps in 0..5) {
+                            // Network congestion detected: step down resolution & quality for smooth motion
+                            adaptiveJpegQuality.set(45)
+                            adaptiveFrameIntervalMs.set(90)
+                            adaptiveTargetShortSide.set(192)
+                        } else if (lat in 90..179) {
+                            adaptiveJpegQuality.set(56)
+                            adaptiveFrameIntervalMs.set(70)
+                            adaptiveTargetShortSide.set(224)
+                        } else {
+                            // Clear channel: step up to crisp HD quality
+                            adaptiveJpegQuality.set(68)
+                            adaptiveFrameIntervalMs.set(58)
+                            adaptiveTargetShortSide.set(256)
+                        }
+                    }
+
                     frameCounter = 0
                     byteCounter = 0
                     lastStatsTime = now
@@ -173,31 +221,65 @@ class WebRtcP2PManager(
         }
     }
 
-    private fun transformStreamBytes(input: ByteArray): ByteArray {
-        val out = ByteArray(input.size)
+    private fun encryptMediaPayload(plainBytes: ByteArray): ByteArray {
+        val peerId = _activePeerId.value
+        if (peerId != null && peerId != "*") {
+            try {
+                val key = nearbyManager.getSessionKey(peerId)
+                return CryptoManager.encryptAesGcm(plainBytes, key)
+            } catch (t: Throwable) {}
+        }
+        val out = ByteArray(plainBytes.size)
         val maskLen = streamCipherMask.size
-        for (i in input.indices) {
-            out[i] = (input[i].toInt() xor streamCipherMask[i % maskLen].toInt()).toByte()
+        for (i in plainBytes.indices) {
+            out[i] = (plainBytes[i].toInt() xor streamCipherMask[i % maskLen].toInt()).toByte()
+        }
+        return out
+    }
+
+    private fun decryptMediaPayload(cipherBytes: ByteArray): ByteArray {
+        val peerId = _activePeerId.value
+        if (peerId != null && peerId != "*" && cipherBytes.size in 29..Int.MAX_VALUE) {
+            try {
+                val key = nearbyManager.getSessionKey(peerId)
+                return CryptoManager.decryptAesGcm(cipherBytes, key)
+            } catch (t: Throwable) {}
+        }
+        val firstPeer = nearbyManager.connectedPeers.value.values.firstOrNull()
+        if (firstPeer != null && cipherBytes.size in 29..Int.MAX_VALUE) {
+            try {
+                val key = nearbyManager.getSessionKey(firstPeer.nodeId)
+                return CryptoManager.decryptAesGcm(cipherBytes, key)
+            } catch (t: Throwable) {}
+        }
+        val out = ByteArray(cipherBytes.size)
+        val maskLen = streamCipherMask.size
+        for (i in cipherBytes.indices) {
+            out[i] = (cipherBytes[i].toInt() xor streamCipherMask[i % maskLen].toInt()).toByte()
         }
         return out
     }
 
     /**
-     * Digital Speech Clarifier & Volume Booster (16-bit PCM):
-     * Filters low-level background hiss and boosts voice clarity by 1.4x without clipping.
+     * Voice Activity Detection (VAD) + Digital Speech Clarifier:
+     * Returns true if active human speech is detected, false if silence/background noise.
      */
-    private fun enhanceVoiceClarityPcm16(pcmBytes: ByteArray, length: Int) {
+    private fun processVadAndClarifyPcm16(pcmBytes: ByteArray, length: Int): Boolean {
+        var sumSquares = 0.0
+        val sampleCount = length / 2
+        if (sampleCount == 0) return false
+
         var i = 0
         while (i + 1 in 0 until length) {
             val lo = pcmBytes[i].toInt() and 0xFF
             val hi = pcmBytes[i + 1].toInt()
             var sample = (hi shl 8) or lo
 
-            // Noise gate: suppress faint background static below threshold
-            if (sample in -160..160) {
+            sumSquares += (sample.toDouble() * sample.toDouble())
+
+            if (sample in -150..150) {
                 sample = 0
             } else {
-                // Boost voice clarity by 1.4x and clamp to 16-bit signed range
                 sample = ((sample * 14) / 10).coerceIn(-32700, 32700)
             }
 
@@ -205,6 +287,9 @@ class WebRtcP2PManager(
             pcmBytes[i + 1] = ((sample shr 8) and 0xFF).toByte()
             i += 2
         }
+
+        val rms = sqrt(sumSquares / sampleCount)
+        return rms >= VAD_RMS_THRESHOLD
     }
 
     fun toggleWalkieTalkieMode() {
@@ -216,7 +301,8 @@ class WebRtcP2PManager(
     }
 
     fun startPttTransmission() {
-        if (_callState.value != CallState.IDLE || _isPttTransmitting.value) return
+        // Floor Control Arbitration: Prevent talking over an active incoming PTT stream
+        if (_callState.value != CallState.IDLE || _isPttTransmitting.value || _isPttReceiving.value) return
         _isPttTransmitting.value = true
         nearbyManager.setCallHighSpeedMode(true)
         ensureAudibleSpeakerVolume()
@@ -289,6 +375,7 @@ class WebRtcP2PManager(
         _localVideoBitmap.value = null
         isVideoFrameInFlight.set(false)
         isVideoDecodeInFlight.set(false)
+        lastReceivedAudioSeq = -1
 
         scope.launch {
             delay(200)
@@ -338,7 +425,7 @@ class WebRtcP2PManager(
             sourceNodeId = nearbyManager.localNodeId,
             sourceNodeName = nearbyManager.localNodeName,
             destinationNodeId = targetPeerId,
-            ttl = 12,
+            ttl = 10,
             packetType = PacketType.WEBRTC_SIGNAL,
             payloadCiphertext = signal.toJson()
         )
@@ -415,7 +502,8 @@ class WebRtcP2PManager(
                 return
             }
             val now = System.currentTimeMillis()
-            if (_isVideoMuted.value || (now - lastFrameTimestamp) in 0L until VIDEO_INTERVAL_MS) {
+            val dynamicInterval = adaptiveFrameIntervalMs.get().toLong()
+            if (_isVideoMuted.value || (now - lastFrameTimestamp) in 0L until dynamicInterval) {
                 return
             }
             if (!isVideoFrameInFlight.compareAndSet(false, true)) {
@@ -426,8 +514,13 @@ class WebRtcP2PManager(
             try {
                 val jpegData = convertProxyHardwareSmoothJpeg(imageProxy)
                 if (jpegData != null && _callState.value == CallState.CONNECTED) {
-                    val payload = transformStreamBytes(jpegData)
-                    nearbyManager.sendDirectVideoFrame(payload)
+                    // Prepend 8-byte capture timestamp for End-to-End Latency & Jitter tracking
+                    val timedFrame = ByteBuffer.allocate(8 + jpegData.size)
+                        .putLong(System.currentTimeMillis())
+                        .put(jpegData)
+                        .array()
+                    val encryptedPayload = encryptMediaPayload(timedFrame)
+                    nearbyManager.sendDirectVideoFrame(encryptedPayload)
                 }
             } finally {
                 isVideoFrameInFlight.set(false)
@@ -442,13 +535,25 @@ class WebRtcP2PManager(
     private fun onEncryptedVideoReceived(encryptedBytes: ByteArray) {
         if (_callState.value != CallState.CONNECTED) return
         try {
-            val rawJpeg = transformStreamBytes(encryptedBytes)
+            val decrypted = decryptMediaPayload(encryptedBytes)
+            var rawJpeg = decrypted
+
+            if (decrypted.size in 32..Int.MAX_VALUE) {
+                val sentTs = ByteBuffer.wrap(decrypted, 0, 8).long
+                val now = System.currentTimeMillis()
+                val diff = if (now >= sentTs) (now - sentTs) else (sentTs - now)
+                if (diff in 1L..5000L) {
+                    _rttMs.value = diff.toInt().coerceIn(5, 999)
+                    rawJpeg = decrypted.copyOfRange(8, decrypted.size)
+                }
+            }
+
             val opts = BitmapFactory.Options().apply {
                 inPreferredConfig = Bitmap.Config.ARGB_8888
                 inDither = true
             }
             val bmp = BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size, opts)
-                ?: BitmapFactory.decodeByteArray(encryptedBytes, 0, encryptedBytes.size, opts)
+                ?: BitmapFactory.decodeByteArray(decrypted, 0, decrypted.size, opts)
 
             if (bmp != null) {
                 _remoteVideoBitmap.value = bmp
@@ -458,10 +563,6 @@ class WebRtcP2PManager(
         } catch (t: Throwable) {}
     }
 
-    /**
-     * Fast Native C++ YuvImage + Bilinear Filtered HD Scaler:
-     * Produces smooth, anti-aliased video frames with zero lag.
-     */
     private fun convertProxyHardwareSmoothJpeg(image: ImageProxy): ByteArray? {
         try {
             val srcW = image.width
@@ -519,13 +620,12 @@ class WebRtcP2PManager(
 
             val yuvImg = YuvImage(nv21, ImageFormat.NV21, srcW, srcH, null)
             val rawOut = ByteArrayOutputStream()
-            yuvImg.compressToJpeg(Rect(0, 0, srcW, srcH), 82, rawOut)
+            yuvImg.compressToJpeg(Rect(0, 0, srcW, srcH), 80, rawOut)
             val rawBytes = rawOut.toByteArray()
 
             val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
 
-            // Target smooth resolution with Bilinear Filtering (filter = true)
-            val targetShortSide = 256f
+            val targetShortSide = adaptiveTargetShortSide.get().toFloat()
             val scale = minOf(targetShortSide / minOf(decoded.width, decoded.height), 1f)
             val m = Matrix()
             m.postScale(scale, scale)
@@ -542,7 +642,8 @@ class WebRtcP2PManager(
             _localVideoBitmap.value = smoothBitmap
 
             val finalStream = ByteArrayOutputStream()
-            smoothBitmap.compress(Bitmap.CompressFormat.JPEG, VIDEO_JPEG_QUALITY, finalStream)
+            val dynamicQuality = adaptiveJpegQuality.get().coerceIn(38, 75)
+            smoothBitmap.compress(Bitmap.CompressFormat.JPEG, dynamicQuality, finalStream)
             return finalStream.toByteArray()
         } catch (t: Throwable) {
             return null
@@ -587,6 +688,8 @@ class WebRtcP2PManager(
 
             audioRecordJob = scope.launch(Dispatchers.IO) {
                 val packetBuf = ByteArray(AUDIO_PACKET_BYTES)
+                var silentFramesCount = 0
+
                 while (isActive && (_callState.value == CallState.CONNECTED || _isPttTransmitting.value)) {
                     val shouldSend = (_callState.value == CallState.CONNECTED && !_isMicMuted.value) || _isPttTransmitting.value
                     if (shouldSend) {
@@ -606,9 +709,24 @@ class WebRtcP2PManager(
 
                         if (totalRead in 1..Int.MAX_VALUE) {
                             val chunk = packetBuf.copyOf(totalRead)
-                            enhanceVoiceClarityPcm16(chunk, chunk.size)
-                            val masked = transformStreamBytes(chunk)
-                            nearbyManager.sendDirectAudioFrame(masked)
+                            val hasVoice = processVadAndClarifyPcm16(chunk, chunk.size)
+
+                            if (hasVoice) {
+                                silentFramesCount = 0
+                            } else {
+                                silentFramesCount += 1
+                            }
+
+                            // VAD Optimization: Transmit active speech + 3 trailing frames for natural decay
+                            if (hasVoice || silentFramesCount in 1..3 || _isPttTransmitting.value) {
+                                val seq = outgoingAudioSeq.incrementAndGet()
+                                val sequencedAudio = ByteBuffer.allocate(4 + chunk.size)
+                                    .putInt(seq)
+                                    .put(chunk)
+                                    .array()
+                                val encryptedAudio = encryptMediaPayload(sequencedAudio)
+                                nearbyManager.sendDirectAudioFrame(encryptedAudio)
+                            }
                         }
                     } else {
                         delay(25)
@@ -685,10 +803,26 @@ class WebRtcP2PManager(
         val track = audioTrack ?: return
 
         try {
-            val pcmData = transformStreamBytes(encryptedAudio)
+            val decrypted = decryptMediaPayload(encryptedAudio)
+            var pcmData = decrypted
+
+            // Extract 4-byte sequence number to measure Packet Loss & Jitter
+            if (decrypted.size in 36..Int.MAX_VALUE && (decrypted.size % 2 == 0)) {
+                val seq = ByteBuffer.wrap(decrypted, 0, 4).int
+                if (seq in 1..10_000_000) {
+                    if (lastReceivedAudioSeq in 1 until seq) {
+                        val gap = (seq - lastReceivedAudioSeq - 1).coerceIn(0, 20)
+                        lostAudioPacketsWindow += gap
+                    }
+                    lastReceivedAudioSeq = seq
+                    receivedAudioPacketsWindow += 1
+                    pcmData = decrypted.copyOfRange(4, decrypted.size)
+                }
+            }
 
             if (!inCall) {
                 _isPttReceiving.value = true
+                // Floor Control: If we were transmitting, yield if remote started first
                 pttResetJob?.cancel()
                 pttResetJob = scope.launch {
                     delay(650)

@@ -97,7 +97,7 @@ fun MeshRadarScreen(
     val isGraphView by viewModel.isGraphView.collectAsState()
     val peerToVerify by viewModel.peerToVerify.collectAsState()
 
-    val isGlobalBridgeConnected by viewModel.isGlobalBridgeConnected.collectAsState()
+    val isGlobalBridgeConnected by viewModel.nearbyManager.isGlobalBridgeConnected.collectAsState()
 
     val isWalkieTalkieEnabled by viewModel.isWalkieTalkieEnabled.collectAsState()
     val isPttTransmitting by viewModel.isPttTransmitting.collectAsState()
@@ -339,7 +339,6 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Zero-Config Automatic Global Bridge Status Banner (No manual buttons or codes needed)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -598,7 +597,6 @@ fun MeshRadarScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Walkie-Talkie Live PTT Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()

@@ -94,6 +94,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isAppLocked = repository.isAppLocked
     val translatedMessages = repository.translatedMessages
     val pinnedMessages = repository.pinnedMessages
+    val stegoSecrets = repository.stegoSecrets
+    val revealedStegoIds = repository.revealedStegoIds
 
     val isWalkieTalkieEnabled = webRtcManager.isWalkieTalkieEnabled
     val isPttTransmitting = webRtcManager.isPttTransmitting
@@ -296,6 +298,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 notif?.play()
             }
         } catch (t: Throwable) {}
+    }
+
+    fun sendStegoMessageInActiveChat(coverText: String, secretText: String) {
+        val recipientId = selectedPeerId.value ?: "*"
+        repository.sendStegoHiddenMessage(recipientId, coverText, secretText)
+    }
+
+    fun toggleRevealStegoMessage(messageId: String) {
+        repository.toggleRevealStegoMessage(messageId)
+    }
+
+    fun sendDigitalVoucherInActiveChat(amount: String, purpose: String) {
+        val recipientId = selectedPeerId.value ?: "*"
+        repository.sendSignedDigitalVoucher(recipientId, amount, purpose)
+    }
+
+    fun sendLiveTelemetryInActiveChat() {
+        val recipientId = selectedPeerId.value ?: "*"
+        repository.sendLiveTelemetryBeacon(recipientId)
+    }
+
+    fun getActivePeerDistanceText(): String {
+        return repository.estimatePeerDistanceText(selectedPeerId.value)
     }
 
     fun editMessageInActiveChat(messageId: String, newText: String) {

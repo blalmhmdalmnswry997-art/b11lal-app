@@ -104,43 +104,14 @@ import java.util.Locale
 private val nullStrVal: String? = null
 private val newlineChar = Char(10)
 
-private fun encodeTacticalMorse(input: String): String {
-    val map = mapOf(
-        'a' to ".-", 'b' to "-...", 'c' to "-.-.", 'd' to "-..", 'e' to ".",
-        'f' to "..-.", 'g' to "--.", 'h' to "....", 'i' to "..", 'j' to ".---",
-        'k' to "-.-", 'l' to ".-..", 'm' to "--", 'n' to "-.", 'o' to "---",
-        'p' to ".--.", 'q' to "--.-", 'r' to ".-.", 's' to "...", 't' to "-",
-        'u' to "..-", 'v' to "...-", 'w' to ".--", 'x' to "-..-", 'y' to "-.--",
-        'z' to "--..", '1' to ".----", '2' to "..---", '3' to "...--", '4' to "....-",
-        '5' to ".....", '6' to "-....", '7' to "--...", '8' to "---..", '9' to "----.",
-        '0' to "-----",
-        'ا' to ".-", 'أ' to ".-", 'إ' to ".-", 'ب' to "-...", 'ت' to "-", 'ث' to "-.-.",
-        'ج' to ".---", 'ح' to "....", 'خ' to "---", 'د' to "-..", 'ذ' to "--..",
-        'ر' to ".-.", 'ز' to "---.", 'س' to "...", 'ش' to "----", 'ص' to "-..-",
-        'ض' to "...-", 'ط' to "..-", 'ظ' to "-.--", 'ع' to ".-.-", 'غ' to "--.",
-        'ف' to "..-.", 'ق' to "--.-", 'ك' to "-.-", 'ل' to ".-..", 'م' to "--",
-        'ن' to "-.", 'ه' to "..-..", 'ة' to "..-..", 'و' to ".--", 'ي' to "..", 'ى' to ".."
-    )
-    val sb = StringBuilder("⚡ [شفرة مورس التكتيكية]: ")
-    for (ch in input.lowercase(Locale.ROOT)) {
-        if (ch == ' ') {
-            sb.append(" / ")
-        } else {
-            val code = map[ch]
-            if (code != null) {
-                sb.append(code).append(" ")
-            }
-        }
-    }
-    return sb.toString().trim()
-}
-
 @Composable
 fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
 
-    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+    val nullTts: TextToSpeech? = null
+    var ttsEngine by remember { mutableStateOf(nullTts) }
+    var voiceSpeedLabel by remember { mutableStateOf("1x") }
 
     DisposableEffect(context) {
         var instance: TextToSpeech? = null
@@ -183,12 +154,12 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     var replyQuoteSender by remember { mutableStateOf(nullStrVal) }
 
     var showStegoDialog by remember { mutableStateOf(false) }
-    var stegoCoverInput by remember { mutableStateOf("السلام عليكم، الأمور طيبة إن شاء الله") }
+    var stegoCoverInput by remember { mutableStateOf("السلام عليكم، كيف حالك اليوم؟") }
     var stegoSecretInput by remember { mutableStateOf("") }
 
-    var showVoucherDialog by remember { mutableStateOf(false) }
-    var voucherAmountInput by remember { mutableStateOf("") }
-    var voucherPurposeInput by remember { mutableStateOf("") }
+    var showFilterStarredOnly by remember { mutableStateOf(false) }
+    var starredMessageIds by remember { mutableStateOf(setOf("init").minus("init")) }
+    var messageReactions by remember { mutableStateOf(mapOf("init" to "").minus("init")) }
 
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -208,19 +179,25 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         viewModel.getActivePeerDistanceText()
     }
 
-    val displayedMessages = remember(messages, searchQuery, isSearchActive) {
-        if (!isSearchActive || searchQuery.isBlank()) {
-            messages
+    val displayedMessages = remember(messages, searchQuery, isSearchActive, showFilterStarredOnly, starredMessageIds) {
+        val base = if (showFilterStarredOnly) {
+            messages.filter { starredMessageIds.contains(it.id) }
         } else {
-            messages.filter { it.text.contains(searchQuery.trim(), ignoreCase = true) }
+            messages
+        }
+        if (!isSearchActive || searchQuery.isBlank()) {
+            base
+        } else {
+            base.filter { it.text.contains(searchQuery.trim(), ignoreCase = true) }
         }
     }
 
     val quickReplies = remember {
         listOf(
+            "👋 السلام عليكم",
             "👍 تم الاستلام",
+            "📞 اتصل بي فيديو HD",
             "📍 أين موقعك؟",
-            "📞 اتصل بي الآن",
             "✅ أنا في الطريق",
             "⏳ انتظر لحظة"
         )
@@ -244,6 +221,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     }
 
     Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
+        // Top Chat Header Bar
         Row(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -283,15 +261,25 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         }
                     }
                     Text(
-                        text = "📏 $liveDistanceText",
+                        text = if (inputText.isNotEmpty()) "✍️ جاري الكتابة الآن..." else "✨ صوت وفيديو HD • $liveDistanceText",
                         fontSize = 11.sp,
-                        color = if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure,
+                        color = if (inputText.isNotEmpty()) CyanPrimary else if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(
+                    onClick = { showFilterStarredOnly = !showFilterStarredOnly }
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "الرسائل المميزة بنجمة",
+                        tint = if (showFilterStarredOnly) AmberMesh else Color.LightGray
+                    )
+                }
+
                 IconButton(
                     onClick = {
                         isSearchActive = !isSearchActive
@@ -307,10 +295,10 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
 
                 if (!isBroadcast && selectedPeerId != null) {
                     IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE) }, modifier = Modifier.testTag("voice_call_button")) {
-                        Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية", tint = CyanPrimary)
+                        Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية HD", tint = CyanPrimary)
                     }
                     IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VIDEO) }, modifier = Modifier.testTag("video_call_button")) {
-                        Icon(Icons.Default.Videocam, contentDescription = "مكالمة فيديو", tint = EmeraldSecure)
+                        Icon(Icons.Default.Videocam, contentDescription = "مكالمة فيديو HD", tint = EmeraldSecure)
                     }
                     currentPeer?.let { peer ->
                         IconButton(onClick = { viewModel.openVerificationDialog(peer) }, modifier = Modifier.testTag("verify_key_button")) {
@@ -332,7 +320,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("ابحث عن كلمة داخل الرسائل...", fontSize = 12.sp, color = Color.Gray) },
+                    placeholder = { Text("ابحث عن أي رسالة أو كلمة...", fontSize = 12.sp, color = Color.Gray) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
@@ -361,7 +349,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     Icon(Icons.Default.Star, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     Column {
-                        Text("رسالة مثبتة 📌", fontSize = 10.sp, color = AmberMesh, fontWeight = FontWeight.Bold)
+                        Text("رسالة مثبتة في أعلى المحادثة 📌", fontSize = 10.sp, color = AmberMesh, fontWeight = FontWeight.Bold)
                         Text(
                             text = currentPinnedText,
                             fontSize = 12.sp,
@@ -390,16 +378,56 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 val translatedText = translatedMessages[message.id]
                 val secretStegoText = stegoSecrets[message.id]
                 val isStegoRevealed = revealedStegoIds.contains(message.id)
+                val isStarred = starredMessageIds.contains(message.id)
+                val reactionEmoji = messageReactions[message.id]
 
                 MessageBubble(
                     message = message,
                     isPlaying = playingMessageId == message.id,
                     isSelected = isSelected,
+                    isStarred = isStarred,
+                    reactionEmoji = reactionEmoji,
+                    voiceSpeedLabel = voiceSpeedLabel,
                     translatedText = translatedText,
                     secretStegoText = secretStegoText,
                     isStegoRevealed = isStegoRevealed,
                     onBubbleClick = {
                         selectedMessageId = if (selectedMessageId == message.id) null else message.id
+                    },
+                    onReactionSelected = { emoji ->
+                        messageReactions = messageReactions + (message.id to emoji)
+                        val baseClean = message.text
+                            .replace(" [❤️]", "")
+                            .replace(" [😂]", "")
+                            .replace(" [🔥]", "")
+                            .replace(" [👍]", "")
+                            .replace(" [👏]", "")
+                            .replace("(معدلة ✏️)", "")
+                            .trim()
+                        viewModel.editMessageInActiveChat(message.id, "$baseClean [$emoji]")
+                        selectedMessageId = null
+                    },
+                    onToggleStar = {
+                        starredMessageIds = if (isStarred) {
+                            starredMessageIds - message.id
+                        } else {
+                            starredMessageIds + message.id
+                        }
+                        selectedMessageId = null
+                    },
+                    onToggleVoiceSpeed = {
+                        val nextSpeed = when (voiceSpeedLabel) {
+                            "1x" -> "1.5x"
+                            "1.5x" -> "2x"
+                            else -> "1x"
+                        }
+                        voiceSpeedLabel = nextSpeed
+                        val rate = when (nextSpeed) {
+                            "1.5x" -> 1.5f
+                            "2x" -> 2.0f
+                            else -> 1.0f
+                        }
+                        try { ttsEngine?.setSpeechRate(rate) } catch (e: Exception) {}
                     },
                     onToggleStegoReveal = {
                         viewModel.toggleRevealStegoMessage(message.id)
@@ -409,7 +437,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     onSpeakClick = {
                         try {
                             val textToRead = translatedText ?: message.text
-                            val hasArabic = textToRead.any { it in '\u0600'..'\u06FF' }
+                            val hasArabic = textToRead.any { it.code in 1536..1791 }
                             ttsEngine?.language = if (hasArabic) Locale("ar") else Locale.US
                             ttsEngine?.speak(textToRead, TextToSpeech.QUEUE_FLUSH, null, message.id)
                         } catch (e: Exception) {}
@@ -444,7 +472,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Super-Power Exclusive Tools Bar + Quick Replies
+        // Attractive Chat Tools & Quick Replies Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -466,7 +494,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "🕵️ رسالة مموهة",
+                    text = "🔒 رسالة سرية بكلمة مرور",
                     fontSize = 11.sp,
                     color = AmberMesh,
                     fontWeight = FontWeight.Bold
@@ -478,54 +506,13 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     .clip(RoundedCornerShape(14.dp))
                     .background(EmeraldSecure.copy(alpha = 0.18f))
                     .border(1.dp, EmeraldSecure, RoundedCornerShape(14.dp))
-                    .clickable {
-                        voucherAmountInput = ""
-                        voucherPurposeInput = ""
-                        showVoucherDialog = true
-                    }
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
-            ) {
-                Text(
-                    text = "💸 سند رقمي موثق",
-                    fontSize = 11.sp,
-                    color = EmeraldSecure,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(CyanPrimary.copy(alpha = 0.18f))
-                    .border(1.dp, CyanPrimary, RoundedCornerShape(14.dp))
                     .clickable { viewModel.sendLiveTelemetryInActiveChat() }
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "📡 نبض الحي والبطارية",
+                    text = "🔋 مشاركة حالة البطارية والشبكة",
                     fontSize = 11.sp,
-                    color = CyanPrimary,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(RedAlert.copy(alpha = 0.18f))
-                    .border(1.dp, RedAlert, RoundedCornerShape(14.dp))
-                    .clickable {
-                        val base = inputText.ifBlank { "SOS" }
-                        val morse = encodeTacticalMorse(base)
-                        viewModel.sendTextMessage("$morse ($base)")
-                        inputText = ""
-                    }
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
-            ) {
-                Text(
-                    text = "⚡ شفرة مورس",
-                    fontSize = 11.sp,
-                    color = RedAlert,
+                    color = EmeraldSecure,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -600,13 +587,13 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     onClick = { mediaPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
                     modifier = Modifier.testTag("attach_button")
                 ) {
-                    Icon(Icons.Default.AttachFile, contentDescription = "إرفاق ملف", tint = CyanPrimary)
+                    Icon(Icons.Default.AttachFile, contentDescription = "إرفاق صورة أو فيديو", tint = CyanPrimary)
                 }
 
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("اكتب رسالة مشفرة...", color = Color(0xFF536B8D), fontSize = 12.sp) },
+                    placeholder = { Text("اكتب رسالة (أو اضغط على أي رسالة للتفاعل ❤️ والترجمة)...", color = Color(0xFF536B8D), fontSize = 11.sp) },
                     modifier = Modifier.weight(1f).testTag("message_input_field"),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -658,7 +645,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         onClick = { viewModel.startVoiceRecording() },
                         modifier = Modifier.size(44.dp).clip(CircleShape).background(EmeraldSecure).testTag("voice_record_button")
                     ) {
-                        Icon(Icons.Default.Mic, contentDescription = "تسجيل صوتي", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
+                        Icon(Icons.Default.Mic, contentDescription = "تسجيل صوتي نقي", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
                     }
                 }
             }
@@ -675,14 +662,14 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = "🕵️ إرسال رسالة شبحية مموهة",
+                        text = "🔒 إرسال رسالة خاصة مخفية",
                         style = MaterialTheme.typography.titleMedium,
                         color = AmberMesh,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "ستظهر الرسالة الظاهرية فقط على الشاشة، ولن تظهر الرسالة السرية المخفية إلا عند الضغط على زر الكشف:",
+                        text = "تظهر الرسالة العادية على الشاشة، وعند الضغط عليها يظهر النص السري المخفي بداخلها:",
                         fontSize = 11.sp,
                         color = Color(0xFF8FA4C4)
                     )
@@ -690,14 +677,14 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     OutlinedTextField(
                         value = stegoCoverInput,
                         onValueChange = { stegoCoverInput = it },
-                        label = { Text("الرسالة الظاهرية العادية (التمويه)", color = CyanPrimary, fontSize = 11.sp) },
+                        label = { Text("الرسالة الظاهرية العادية", color = CyanPrimary, fontSize = 11.sp) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
                         value = stegoSecretInput,
                         onValueChange = { stegoSecretInput = it },
-                        label = { Text("الرسالة السرية المخفية بداخلها 🔒", color = AmberMesh, fontSize = 11.sp) },
+                        label = { Text("النص السري المخفي بداخلها 🔒", color = AmberMesh, fontSize = 11.sp) },
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(16.dp))
@@ -718,70 +705,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = AmberMesh)
                         ) {
-                            Text("إرسال مموه 🕵️", color = Color(0xFF001F29), fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (showVoucherDialog) {
-        Dialog(onDismissRequest = { showVoucherDialog = false }) {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
-                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldSecure)
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Text(
-                        text = "💸 إصدار سند رقمي مشفر وموثق",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = EmeraldSecure,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "يتم توقيع هذا السند تلقائياً ببصمة مفتاحك التشفيري (X25519) ليكون غير قابل للتزوير بدون إنترنت:",
-                        fontSize = 11.sp,
-                        color = Color(0xFF8FA4C4)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = voucherAmountInput,
-                        onValueChange = { voucherAmountInput = it },
-                        label = { Text("المبلغ أو القيمة (مثال: 50,000 ريال)", color = EmeraldSecure, fontSize = 11.sp) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = voucherPurposeInput,
-                        onValueChange = { voucherPurposeInput = it },
-                        label = { Text("البيان أو سبب السند", color = CyanPrimary, fontSize = 11.sp) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        OutlinedButton(onClick = { showVoucherDialog = false }) {
-                            Text("إلغاء", color = Color.LightGray)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                if (voucherAmountInput.isNotBlank()) {
-                                    viewModel.sendDigitalVoucherInActiveChat(voucherAmountInput, voucherPurposeInput)
-                                    showVoucherDialog = false
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldSecure)
-                        ) {
-                            Text("توقيع وإرسال 💸", color = Color(0xFF00220F), fontWeight = FontWeight.Bold)
+                            Text("إرسال الآن 🔒", color = Color(0xFF001F29), fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -870,7 +794,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("معاينة الصورة بوضوح كامل", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("معاينة الصورة بوضوح كامل HD", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         IconButton(onClick = { fullScreenImagePath = null }) {
                             Icon(Icons.Default.Close, contentDescription = "إغلاق", tint = Color.White)
                         }
@@ -902,10 +826,16 @@ private fun MessageBubble(
     message: ChatMessage,
     isPlaying: Boolean,
     isSelected: Boolean,
+    isStarred: Boolean,
+    reactionEmoji: String?,
+    voiceSpeedLabel: String,
     translatedText: String?,
     secretStegoText: String?,
     isStegoRevealed: Boolean,
     onBubbleClick: () -> Unit,
+    onReactionSelected: (String) -> Unit,
+    onToggleStar: () -> Unit,
+    onToggleVoiceSpeed: () -> Unit,
     onToggleStegoReveal: () -> Unit,
     onPlayVoiceNote: () -> Unit,
     onImageClick: (String) -> Unit,
@@ -925,6 +855,8 @@ private fun MessageBubble(
         message.text.any { it in 'a'..'z' || it in 'A'..'Z' }
     }
 
+    val reactionOptions = remember { listOf("❤️", "👍", "🔥", "😂", "👏") }
+
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
         if (message.hopCount in 1..Int.MAX_VALUE || message.relayPath.isNotEmpty()) {
             val hopText = if (message.relayPath.isNotEmpty()) "مرسل عبر: ${message.relayPath.joinToString(" <- ")}" else "تم توجيهه (${message.hopCount} قفزات)"
@@ -932,6 +864,28 @@ private fun MessageBubble(
                 Icon(Icons.Default.Hub, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(10.dp))
                 Spacer(Modifier.width(4.dp))
                 Text(hopText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = AmberMesh, fontWeight = FontWeight.Medium)
+            }
+        }
+
+        // Instant Emoji Reaction Bar when bubble is tapped
+        if (isSelected) {
+            Row(
+                modifier = Modifier
+                    .padding(bottom = 4.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xFF0F1A2E))
+                    .border(1.dp, CyanPrimary.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (emoji in reactionOptions) {
+                    Text(
+                        text = emoji,
+                        fontSize = 18.sp,
+                        modifier = Modifier.clickable { onReactionSelected(emoji) }
+                    )
+                }
             }
         }
 
@@ -966,7 +920,13 @@ private fun MessageBubble(
                             Text("📷 [صورة: ${message.fileName}]", color = Color.White, fontSize = 13.sp)
                         }
                     }
-                    MediaType.AUDIO_NOTE -> VoiceNoteBubble(isPlaying = isPlaying, text = message.text, onPlayClick = onPlayVoiceNote)
+                    MediaType.AUDIO_NOTE -> VoiceNoteBubble(
+                        isPlaying = isPlaying,
+                        text = message.text,
+                        speedLabel = voiceSpeedLabel,
+                        onPlayClick = onPlayVoiceNote,
+                        onSpeedClick = onToggleVoiceSpeed
+                    )
                     else -> Text(message.text, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE6F1FF))
                 }
 
@@ -982,7 +942,7 @@ private fun MessageBubble(
                     ) {
                         Column {
                             Text(
-                                text = if (isStegoRevealed) "🕵️ الرسالة السرية المخفية (اضغط للإخفاء):" else "🕵️ تحتوي على طبقة سرية مموهة (اضغط للكشف)",
+                                text = if (isStegoRevealed) "🔒 النص السري المخفي (اضغط للإخفاء):" else "🔒 تحتوي على نص سري مخفي (اضغط للكشف)",
                                 fontSize = 10.sp,
                                 color = AmberMesh,
                                 fontWeight = FontWeight.Bold
@@ -1056,6 +1016,11 @@ private fun MessageBubble(
                             onClick = onSpeakClick
                         )
                         ActionChipButton(
+                            label = if (isStarred) "إلغاء النجمة ⭐" else "تمييز بنجمة ⭐",
+                            color = AmberMesh,
+                            onClick = onToggleStar
+                        )
+                        ActionChipButton(
                             label = "ترجمة 🌐",
                             color = EmeraldSecure,
                             onClick = onTranslateClick
@@ -1095,6 +1060,14 @@ private fun MessageBubble(
                 Spacer(Modifier.height(4.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End, modifier = Modifier.align(Alignment.End)) {
+                    if (!reactionEmoji.isNullOrBlank()) {
+                        Text(reactionEmoji, fontSize = 13.sp)
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    if (isStarred) {
+                        Text("⭐", fontSize = 11.sp)
+                        Spacer(Modifier.width(4.dp))
+                    }
                     val timeStr = SimpleDateFormat("hh:mm a", Locale("ar")).format(Date(message.timestamp))
                     Text(timeStr, fontSize = 10.sp, color = Color(0xFF8FA4C4), fontFamily = FontFamily.Monospace)
                     if (message.isOutgoing) {
@@ -1138,7 +1111,13 @@ private fun ActionChipButton(
 }
 
 @Composable
-private fun VoiceNoteBubble(isPlaying: Boolean, text: String, onPlayClick: () -> Unit) {
+private fun VoiceNoteBubble(
+    isPlaying: Boolean,
+    text: String,
+    speedLabel: String,
+    onPlayClick: () -> Unit,
+    onSpeedClick: () -> Unit
+) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
         IconButton(onClick = onPlayClick, modifier = Modifier.size(36.dp).clip(CircleShape).background(EmeraldSecure)) {
             Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color(0xFF00220F), modifier = Modifier.size(20.dp))
@@ -1146,7 +1125,18 @@ private fun VoiceNoteBubble(isPlaying: Boolean, text: String, onPlayClick: () ->
         Spacer(Modifier.width(10.dp))
         Column {
             Text(text, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-            Text(if (isPlaying) "جاري التشغيل..." else "اضغط للاستماع", fontSize = 10.sp, color = EmeraldSecure)
+            Text(if (isPlaying) "جاري التشغيل بنقاء HD..." else "اضغط للاستماع", fontSize = 10.sp, color = EmeraldSecure)
+        }
+        Spacer(Modifier.width(10.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(CyanPrimary.copy(alpha = 0.2f))
+                .border(1.dp, CyanPrimary.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                .clickable { onSpeedClick() }
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+        ) {
+            Text(speedLabel, fontSize = 11.sp, color = CyanPrimary, fontWeight = FontWeight.ExtraBold)
         }
     }
 }
@@ -1161,7 +1151,7 @@ private fun VoiceNoteRecordingBar(durationSec: Int, onCancel: () -> Unit, onSend
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(12.dp).clip(CircleShape).background(RedAlert))
             Spacer(Modifier.width(10.dp))
-            Text("جاري التسجيل 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("تسجيل صوتي نقي HD • 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             IconButton(onClick = onCancel, modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF162540))) {

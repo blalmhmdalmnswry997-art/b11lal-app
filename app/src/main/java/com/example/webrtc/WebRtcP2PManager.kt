@@ -200,7 +200,7 @@ class WebRtcP2PManager(
 
         val offer = WebRtcSignalMessage(
             type = "OFFER",
-            sdp = "v=0\r\no=CipherMesh 0 0 IN IP4 127.0.0.1\r\ns=DirectCall\r\nt=0 0",
+            sdp = "v=0;o=CipherMesh;s=DirectCall",
             callType = type
         )
         sendSignalPacket(peerNodeId, offer)
@@ -213,7 +213,7 @@ class WebRtcP2PManager(
 
         val answer = WebRtcSignalMessage(
             type = "ANSWER",
-            sdp = "v=0\r\no=CipherMesh 0 0 IN IP4 127.0.0.1\r\ns=DirectAnswer\r\nt=0 0",
+            sdp = "v=0;o=CipherMesh;s=DirectAnswer",
             callType = _callType.value
         )
         sendSignalPacket(peerId, answer)
@@ -222,7 +222,6 @@ class WebRtcP2PManager(
 
     fun rejectOrEndCall() {
         val peerId = _activePeerId.value
-        // Stop media first so the network channel is completely free for HANGUP & chat
         resetCallSession()
         if (peerId != null) {
             scope.launch(Dispatchers.IO) {
@@ -298,6 +297,7 @@ class WebRtcP2PManager(
         )
         synchronized(networkSendLock) {
             nearbyManager.sendMeshPacket(pkt)
+            Unit
         }
     }
 
@@ -379,6 +379,7 @@ class WebRtcP2PManager(
                         if (_callState.value == CallState.CONNECTED) {
                             nearbyManager.sendDirectVideoFrame(payload)
                         }
+                        Unit
                     }
                 }
             } finally {
@@ -421,7 +422,6 @@ class WebRtcP2PManager(
             val srcH = image.height
             if (srcW in 0..15 || srcH in 0..15) return null
 
-            // Aggressive fast subsampling to ~160px width for instant zero-lag movement
             val step = maxOf(1, srcW / 160)
             val outW = ((srcW / step) / 2) * 2
             val outH = ((srcH / step) / 2) * 2
@@ -556,6 +556,7 @@ class WebRtcP2PManager(
                                 if (_callState.value == CallState.CONNECTED || _isPttTransmitting.value) {
                                     nearbyManager.sendDirectAudioFrame(outBytes)
                                 }
+                                Unit
                             }
                         }
                     } else {
@@ -627,6 +628,7 @@ class WebRtcP2PManager(
                 am?.mode = AudioManager.MODE_NORMAL
                 am?.isSpeakerphoneOn = false
             } catch (t: Throwable) {}
+            Unit
         }
     }
 
@@ -665,6 +667,7 @@ class WebRtcP2PManager(
             synchronized(audioLock) {
                 track.write(pcmData, 0, pcmData.size, AudioTrack.WRITE_NON_BLOCKING)
                 byteCounter += encryptedAudio.size
+                Unit
             }
         } catch (t: Throwable) {}
     }

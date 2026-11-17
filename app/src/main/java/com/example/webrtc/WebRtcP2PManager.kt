@@ -43,19 +43,20 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class WebRtcP2PManager(
     private val context: Context,
     private val nearbyManager: NearbyConnectionsManager
 ) {
     companion object {
-        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_RATE = 8000
         private const val AUDIO_CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_16BIT
-        private const val AUDIO_PACKET_BYTES = 3200
-        private const val VIDEO_INTERVAL_MS = 130L
-        private const val VIDEO_JPEG_QUALITY = 60
+        private const val AUDIO_PACKET_BYTES = 1600
+        private const val VIDEO_INTERVAL_MS = 90L
+        private const val VIDEO_JPEG_QUALITY = 38
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -82,7 +83,7 @@ class WebRtcP2PManager(
     private val _bitrateKbps = MutableStateFlow(0)
     val bitrateKbps = _bitrateKbps.asStateFlow()
 
-    private val _rttMs = MutableStateFlow(14)
+    private val _rttMs = MutableStateFlow(12)
     val rttMs = _rttMs.asStateFlow()
 
     private val _remoteVideoBitmap = MutableStateFlow(nullBitmap)
@@ -103,7 +104,6 @@ class WebRtcP2PManager(
     private val _isFrontCamera = MutableStateFlow(true)
     val isFrontCamera = _isFrontCamera.asStateFlow()
 
-    // Walkie-Talkie (Push-To-Talk) States
     private val _isWalkieTalkieEnabled = MutableStateFlow(true)
     val isWalkieTalkieEnabled = _isWalkieTalkieEnabled.asStateFlow()
 
@@ -113,13 +113,18 @@ class WebRtcP2PManager(
     private val _isPttReceiving = MutableStateFlow(false)
     val isPttReceiving = _isPttReceiving.asStateFlow()
 
+    private var activeCameraProvider: ProcessCameraProvider? = null
     private var audioRecordJob: Job? = null
     private var pttResetJob: Job? = null
     private var audioTrack: AudioTrack? = null
     private var audioRecord: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var gainControl: AutomaticGainControl? = null
+
     private val audioLock = Any()
+    private val networkSendLock = Any()
+    private val isVideoFrameInFlight = AtomicBoolean(false)
+    private val isVideoDecodeInFlight = AtomicBoolean(false)
 
     private var frameCounter = 0
     private var byteCounter = 0
@@ -135,7 +140,13 @@ class WebRtcP2PManager(
 
         scope.launch(Dispatchers.Default) {
             nearbyManager.incomingVideoFrames.collect { frameBytes ->
-                onEncryptedVideoReceived(frameBytes)
+                if (isVideoDecodeInFlight.compareAndSet(false, true)) {
+                    try {
+                        onEncryptedVideoReceived(frameBytes)
+                    } finally {
+                        isVideoDecodeInFlight.set(false)
+                    }
+                }
             }
         }
 
@@ -211,25 +222,45 @@ class WebRtcP2PManager(
 
     fun rejectOrEndCall() {
         val peerId = _activePeerId.value
-        if (peerId != null) {
-            sendSignalPacket(peerId, WebRtcSignalMessage(type = "HANGUP"))
-        }
+        // Stop media first so the network channel is completely free for HANGUP & chat
         resetCallSession()
+        if (peerId != null) {
+            scope.launch(Dispatchers.IO) {
+                val hangup = WebRtcSignalMessage(type = "HANGUP")
+                sendSignalPacket(peerId, hangup)
+                delay(120)
+                sendSignalPacket(peerId, hangup)
+            }
+        }
     }
 
     private fun resetCallSession() {
         _isPttTransmitting.value = false
-        stopCallMedia()
         _callState.value = CallState.ENDED
+        stopCallMedia()
+        unbindCameraHardware()
         _activePeerId.value = null
         _remoteVideoBitmap.value = null
         _localVideoBitmap.value = null
+        isVideoFrameInFlight.set(false)
+        isVideoDecodeInFlight.set(false)
+
         scope.launch {
-            delay(300)
+            delay(250)
             if (_callState.value == CallState.ENDED) {
                 _callState.value = CallState.IDLE
             }
         }
+    }
+
+    private fun unbindCameraHardware() {
+        try {
+            ContextCompat.getMainExecutor(context).execute {
+                try {
+                    activeCameraProvider?.unbindAll()
+                } catch (t: Throwable) {}
+            }
+        } catch (t: Throwable) {}
     }
 
     fun handleIncomingSignalPacket(packet: MeshPacket) {
@@ -265,7 +296,9 @@ class WebRtcP2PManager(
             packetType = PacketType.WEBRTC_SIGNAL,
             payloadCiphertext = signal.toJson()
         )
-        nearbyManager.sendMeshPacket(pkt)
+        synchronized(networkSendLock) {
+            nearbyManager.sendMeshPacket(pkt)
+        }
     }
 
     private fun startCallMedia() {
@@ -288,6 +321,12 @@ class WebRtcP2PManager(
             future.addListener({
                 try {
                     val provider = future.get()
+                    activeCameraProvider = provider
+                    if (_callState.value != CallState.CONNECTED && _callState.value != CallState.OUTGOING_RINGING) {
+                        provider.unbindAll()
+                        return@addListener
+                    }
+
                     val selector = if (_isFrontCamera.value) {
                         CameraSelector.DEFAULT_FRONT_CAMERA
                     } else {
@@ -295,7 +334,7 @@ class WebRtcP2PManager(
                     }
 
                     val analysis = ImageAnalysis.Builder()
-                        .setTargetResolution(Size(360, 480))
+                        .setTargetResolution(Size(240, 320))
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
@@ -313,24 +352,40 @@ class WebRtcP2PManager(
 
     private fun encodeAndSendFrame(imageProxy: ImageProxy) {
         try {
+            val activeState = _callState.value
+            if (activeState != CallState.CONNECTED && activeState != CallState.OUTGOING_RINGING) {
+                return
+            }
             val now = System.currentTimeMillis()
             if (_isVideoMuted.value || (now - lastFrameTimestamp) in 0L until VIDEO_INTERVAL_MS) {
                 return
             }
+            if (!isVideoFrameInFlight.compareAndSet(false, true)) {
+                return
+            }
             lastFrameTimestamp = now
 
-            val jpegData = convertProxyToJpeg(imageProxy)
-            if (jpegData != null && _callState.value == CallState.CONNECTED) {
-                val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
-                val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
-                val payload = if (key != null) {
-                    try { CryptoManager.encryptAesGcm(jpegData, key) } catch (t: Throwable) { jpegData }
-                } else {
-                    jpegData
+            try {
+                val jpegData = convertProxyToJpeg(imageProxy)
+                if (jpegData != null && _callState.value == CallState.CONNECTED) {
+                    val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
+                    val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
+                    val payload = if (key != null) {
+                        try { CryptoManager.encryptAesGcm(jpegData, key) } catch (t: Throwable) { jpegData }
+                    } else {
+                        jpegData
+                    }
+                    synchronized(networkSendLock) {
+                        if (_callState.value == CallState.CONNECTED) {
+                            nearbyManager.sendDirectVideoFrame(payload)
+                        }
+                    }
                 }
-                nearbyManager.sendDirectVideoFrame(payload)
+            } finally {
+                isVideoFrameInFlight.set(false)
             }
         } catch (t: Throwable) {
+            isVideoFrameInFlight.set(false)
         } finally {
             try { imageProxy.close() } catch (t: Throwable) {}
         }
@@ -366,9 +421,10 @@ class WebRtcP2PManager(
             val srcH = image.height
             if (srcW in 0..15 || srcH in 0..15) return null
 
-            val step = if (srcW in 640..Int.MAX_VALUE) 2 else 1
-            val outW = (srcW / step) and 0xFFFE
-            val outH = (srcH / step) and 0xFFFE
+            // Aggressive fast subsampling to ~160px width for instant zero-lag movement
+            val step = maxOf(1, srcW / 160)
+            val outW = ((srcW / step) / 2) * 2
+            val outH = ((srcH / step) / 2) * 2
             if (outW in 0..15 || outH in 0..15) return null
 
             val yPlane = image.planes[0]
@@ -416,7 +472,7 @@ class WebRtcP2PManager(
 
             val yuvImg = YuvImage(nv21, ImageFormat.NV21, outW, outH, null)
             val tempStream = ByteArrayOutputStream()
-            yuvImg.compressToJpeg(Rect(0, 0, outW, outH), 75, tempStream)
+            yuvImg.compressToJpeg(Rect(0, 0, outW, outH), 55, tempStream)
             val tempBytes = tempStream.toByteArray()
 
             val decoded = BitmapFactory.decodeByteArray(tempBytes, 0, tempBytes.size) ?: return tempBytes
@@ -425,10 +481,7 @@ class WebRtcP2PManager(
             if (deg != 0f) m.postRotate(deg)
             if (_isFrontCamera.value) m.postScale(-1f, 1f)
 
-            val ratio = minOf(320f / decoded.width.toFloat(), 420f / decoded.height.toFloat(), 1f)
-            m.postScale(ratio, ratio)
-
-            val finalBitmap = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, true)
+            val finalBitmap = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, m, false)
             _localVideoBitmap.value = finalBitmap
 
             val finalStream = ByteArrayOutputStream()
@@ -493,20 +546,20 @@ class WebRtcP2PManager(
                         if (totalRead in 1..Int.MAX_VALUE) {
                             val chunk = if (totalRead == AUDIO_PACKET_BYTES) packetBuf.clone() else packetBuf.copyOf(totalRead)
                             val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
-                            val key = if (peerId != null && _callState.value == CallState.CONNECTED) {
-                                nearbyManager.getSessionKey(peerId)
-                            } else {
-                                null
-                            }
+                            val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
                             val outBytes = if (key != null) {
                                 try { CryptoManager.encryptAesGcm(chunk, key) } catch (t: Throwable) { chunk }
                             } else {
                                 chunk
                             }
-                            nearbyManager.sendDirectAudioFrame(outBytes)
+                            synchronized(networkSendLock) {
+                                if (_callState.value == CallState.CONNECTED || _isPttTransmitting.value) {
+                                    nearbyManager.sendDirectAudioFrame(outBytes)
+                                }
+                            }
                         }
                     } else {
-                        delay(40)
+                        delay(30)
                     }
                 }
             }
@@ -530,7 +583,7 @@ class WebRtcP2PManager(
             if (audioTrack != null) return
             try {
                 val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AUDIO_CHANNEL_OUT, AUDIO_ENCODING)
-                val trackBufSize = maxOf(minBuf * 3, SAMPLE_RATE * 2)
+                val trackBufSize = maxOf(minBuf * 2, AUDIO_PACKET_BYTES * 3)
 
                 try {
                     val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
@@ -564,9 +617,16 @@ class WebRtcP2PManager(
 
     private fun releaseAudioPlayer() {
         synchronized(audioLock) {
+            try { audioTrack?.pause() } catch (t: Throwable) {}
+            try { audioTrack?.flush() } catch (t: Throwable) {}
             try { audioTrack?.stop() } catch (t: Throwable) {}
             try { audioTrack?.release() } catch (t: Throwable) {}
             audioTrack = null
+            try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                am?.mode = AudioManager.MODE_NORMAL
+                am?.isSpeakerphoneOn = false
+            } catch (t: Throwable) {}
         }
     }
 
@@ -583,7 +643,7 @@ class WebRtcP2PManager(
             val peerId = _activePeerId.value ?: nearbyManager.connectedPeers.value.values.firstOrNull()?.nodeId
             val key = if (peerId != null) nearbyManager.getSessionKey(peerId) else null
 
-            val pcmData = if (key != null && encryptedAudio.size in (AUDIO_PACKET_BYTES + 1)..Int.MAX_VALUE) {
+            val pcmData = if (key != null && encryptedAudio.size in 29..Int.MAX_VALUE) {
                 try {
                     CryptoManager.decryptAesGcm(encryptedAudio, key)
                 } catch (t: Throwable) {
@@ -597,7 +657,7 @@ class WebRtcP2PManager(
                 _isPttReceiving.value = true
                 pttResetJob?.cancel()
                 pttResetJob = scope.launch {
-                    delay(700)
+                    delay(600)
                     _isPttReceiving.value = false
                 }
             }

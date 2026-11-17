@@ -63,15 +63,23 @@ class NearbyConnectionsManager(private val context: Context) {
     companion object {
         private const val SERVICE_ID = "com.example.ciphermesh.p2p"
         val STRATEGY: Strategy = Strategy.P2P_CLUSTER
-        private const val MAX_SEEN_PACKETS = 8000
+        private const val MAX_SEEN_PACKETS = 10000
         private const val LAN_UDP_PORT = 45454
         private const val LAN_TCP_PORT = 45455
-        private const val DEFAULT_MESH_TTL = 12
+        private const val GLOBAL_RELAY_PORT = 1883
+        private const val DEFAULT_MESH_TTL = 64
+        private const val AUTO_GLOBAL_TOPIC = "ciphermesh/v2/global_auto_mesh"
     }
 
     private val sepChar = Char(124)
     private val cmeshPrefix = "CMESH" + sepChar
     private val videoAckBytes = byteArrayOf(0x56.toByte(), 0x41.toByte())
+
+    private val globalRelayHosts = listOf(
+        "broker.emqx.io",
+        "broker.hivemq.com",
+        "test.mosquitto.org"
+    )
 
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -101,6 +109,13 @@ class NearbyConnectionsManager(private val context: Context) {
     private val _gatewayIps = MutableStateFlow(emptyStringList)
     val gatewayIps = _gatewayIps.asStateFlow()
 
+    // 100% Automatic Global Cross-Border Bridge State
+    private val _isGlobalBridgeConnected = MutableStateFlow(false)
+    val isGlobalBridgeConnected = _isGlobalBridgeConnected.asStateFlow()
+
+    private val _globalFrequencyCode = MutableStateFlow("تلقائي-عالمي")
+    val globalFrequencyCode = _globalFrequencyCode.asStateFlow()
+
     private val incomingPacketChannel = Channel(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: MeshPacket -> }
     val incomingPackets = incomingPacketChannel
         .receiveAsFlow()
@@ -118,6 +133,7 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private val outgoingVideoChannel = Channel(capacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
     private val outgoingAudioChannel = Channel(capacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
+    private val outgoingGlobalChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST) { _: ByteArray -> }
 
     private val unackedVideoFrames = AtomicInteger(0)
     private val lastVideoSendTimestamp = AtomicLong(0L)
@@ -162,6 +178,9 @@ class NearbyConnectionsManager(private val context: Context) {
     private var isLanRunning = false
     private var udpSocket: DatagramSocket? = null
     private var tcpServer: ServerSocket? = null
+    private var globalRelaySocket: Socket? = null
+    private var globalRelayOut: DataOutputStream? = null
+    private val globalWriteLock = Any()
     private var multicastLock: WifiManager.MulticastLock? = null
 
     init {
@@ -170,17 +189,21 @@ class NearbyConnectionsManager(private val context: Context) {
             _gatewayIps.value = saved.toList().sorted()
         }
         startMediaSenderWorkers()
+        startGlobalBridgeWorker()
+    }
+
+    fun setGlobalFrequency(newFrequency: String) {
+        // Automatic mode: kept for compatibility, always uses unified automatic global mesh
+        _globalFrequencyCode.value = "تلقائي-عالمي"
     }
 
     fun setCallHighSpeedMode(enabled: Boolean) {
         isHighSpeedCallMode.set(enabled)
         clearMediaStreams()
         if (enabled) {
-            // Stop scanning so 100% of Wi-Fi Direct / P2P radio bandwidth is dedicated to the call
             try { connectionsClient.stopDiscovery() } catch (e: Exception) {}
             try { connectionsClient.stopAdvertising() } catch (e: Exception) {}
         } else {
-            // Resume mesh discovery & advertising automatically after call ends
             if (isLanRunning) {
                 startAdvertising()
                 startDiscovery()
@@ -196,8 +219,288 @@ class NearbyConnectionsManager(private val context: Context) {
         while (incomingAudioChannel.tryReceive().isSuccess) {}
     }
 
+    /**
+     * Zero-Config Automatic Cross-Border Global Bridge:
+     * Automatically links all users across countries without any manual settings.
+     */
+    private fun startGlobalBridgeWorker() {
+        scope.launch(Dispatchers.IO) {
+            for (payload in outgoingGlobalChannel) {
+                sendGlobalPublishPacket(payload)
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            var hostIndex = 0
+            while (isActive) {
+                if (!isLanRunning) {
+                    delay(1500)
+                    continue
+                }
+                val host = globalRelayHosts[hostIndex % globalRelayHosts.size]
+                hostIndex += 1
+                var sock: Socket? = null
+                try {
+                    sock = Socket()
+                    sock.tcpNoDelay = true
+                    sock.keepAlive = true
+                    sock.connect(InetSocketAddress(host, GLOBAL_RELAY_PORT), 4000)
+
+                    val dis = DataInputStream(BufferedInputStream(sock.getInputStream()))
+                    val dos = DataOutputStream(BufferedOutputStream(sock.getOutputStream()))
+
+                    val clientId = "cm-" + localNodeId.takeLast(6) + "-" + (System.currentTimeMillis() % 999)
+                    val connectPkt = buildMqttConnectPacket(clientId)
+                    synchronized(globalWriteLock) {
+                        dos.write(connectPkt)
+                        dos.flush()
+                    }
+
+                    val ackType = dis.readByte().toInt() and 0xFF
+                    val ackRem = readMqttRemainingLength(dis)
+                    if (ackRem in 1..256) {
+                        dis.skipBytes(ackRem)
+                    }
+                    if (ackType != 0x20) {
+                        sock.close()
+                        delay(2000)
+                        continue
+                    }
+
+                    globalRelaySocket = sock
+                    globalRelayOut = dos
+                    _isGlobalBridgeConnected.value = true
+
+                    val subPkt = buildMqttSubscribePacket(AUTO_GLOBAL_TOPIC)
+                    synchronized(globalWriteLock) {
+                        dos.write(subPkt)
+                        dos.flush()
+                    }
+
+                    sendGlobalPresenceBeacon()
+                    broadcastMultiHopPresence()
+
+                    while (isLanRunning && !sock.isClosed && isActive) {
+                        val headerByte = dis.readByte().toInt() and 0xFF
+                        val remLen = readMqttRemainingLength(dis)
+                        if (remLen in 0..20_000_000) {
+                            val packetType = headerByte / 16
+                            if (packetType == 3 && remLen in 4..20_000_000) {
+                                val tHi = dis.readByte().toInt() and 0xFF
+                                val tLo = dis.readByte().toInt() and 0xFF
+                                val topicLen = tHi * 256 + tLo
+                                val topicBytes = ByteArray(topicLen)
+                                dis.readFully(topicBytes)
+
+                                var headerConsumed = 2 + topicLen
+                                val qos = (headerByte and 0x06) / 2
+                                if (qos in 1..2) {
+                                    dis.readByte()
+                                    dis.readByte()
+                                    headerConsumed += 2
+                                }
+
+                                val payloadLen = remLen - headerConsumed
+                                if (payloadLen in 1..10_000_000) {
+                                    val data = ByteArray(payloadLen)
+                                    dis.readFully(data)
+                                    handleIncomingGlobalBytes(data)
+                                }
+                            } else if (remLen in 1..20_000_000) {
+                                val skipBuf = ByteArray(remLen)
+                                dis.readFully(skipBuf)
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                } catch (e: Exception) {
+                } finally {
+                    _isGlobalBridgeConnected.value = false
+                    globalRelayOut = null
+                    try { sock?.close() } catch (e: Exception) {}
+                }
+                delay(3000)
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            var pingCounter = 0
+            while (isActive) {
+                delay(7000)
+                if (_isGlobalBridgeConnected.value && isLanRunning) {
+                    try {
+                        val dos = globalRelayOut
+                        if (dos != null) {
+                            synchronized(globalWriteLock) {
+                                dos.writeByte(0xC0)
+                                dos.writeByte(0x00)
+                                dos.flush()
+                            }
+                            sendGlobalPresenceBeacon()
+                            if (pingCounter % 2 == 0) {
+                                broadcastMultiHopPresence()
+                            }
+                            pingCounter += 1
+                        }
+                    } catch (e: Exception) {
+                        _isGlobalBridgeConnected.value = false
+                        try { globalRelaySocket?.close() } catch (ex: Exception) {}
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendGlobalPresenceBeacon() {
+        val beaconText = listOf("CMESH", localNodeId, localNodeName, "GLOBAL").joinToString(sepChar.toString())
+        val beaconBytes = beaconText.toByteArray(Charsets.UTF_8)
+        val framed = ByteArray(2 + beaconBytes.size)
+        framed[0] = 0x47.toByte()
+        framed[1] = 0x42.toByte()
+        System.arraycopy(beaconBytes, 0, framed, 2, beaconBytes.size)
+        outgoingGlobalChannel.trySend(framed)
+    }
+
+    private fun sendGlobalPublishPacket(payloadBytes: ByteArray) {
+        val dos = globalRelayOut ?: return
+        if (!_isGlobalBridgeConnected.value) return
+        try {
+            val topicBytes = AUTO_GLOBAL_TOPIC.toByteArray(Charsets.UTF_8)
+            val remLen = 2 + topicBytes.size + payloadBytes.size
+            val out = ByteArrayOutputStream(5 + remLen)
+            out.write(0x30)
+            writeMqttRemainingLength(out, remLen)
+            out.write((topicBytes.size / 256) and 0xFF)
+            out.write(topicBytes.size and 0xFF)
+            out.write(topicBytes)
+            out.write(payloadBytes)
+
+            val pktBytes = out.toByteArray()
+            synchronized(globalWriteLock) {
+                dos.write(pktBytes)
+                dos.flush()
+            }
+        } catch (e: Exception) {
+            _isGlobalBridgeConnected.value = false
+            try { globalRelaySocket?.close() } catch (ex: Exception) {}
+        }
+    }
+
+    private fun handleIncomingGlobalBytes(data: ByteArray) {
+        if (data.size in 0..2) return
+        val b0 = data[0]
+        val b1 = data[1]
+        val body = data.copyOfRange(2, data.size)
+
+        if (b0 == 0x47.toByte() && b1 == 0x42.toByte()) {
+            val msg = String(body, Charsets.UTF_8)
+            if (msg.startsWith(cmeshPrefix)) {
+                val parts = msg.split(sepChar)
+                if (parts.size in 3..10) {
+                    val peerNodeId = parts[1]
+                    val peerName = parts[2]
+                    if (peerNodeId != localNodeId) {
+                        val globalEpId = "global-$peerNodeId"
+                        val alreadyDirect = _connectedPeers.value.values.any { it.nodeId == peerNodeId && !it.endpointId.startsWith("global-") }
+                        if (!alreadyDirect && !_connectedPeers.value.containsKey(globalEpId)) {
+                            val cleanName = peerName.replace(" (Wi-Fi)", "").replace(" (دولي 🌍)", "")
+                            val peerNode = PeerNode(
+                                endpointId = globalEpId,
+                                nodeId = peerNodeId,
+                                nodeName = "$cleanName (دولي 🌍)",
+                                isConnected = true,
+                                isDirect = false,
+                                hops = 2,
+                                signalStrengthDbm = -50
+                            )
+                            _connectedPeers.value = _connectedPeers.value + (globalEpId to peerNode)
+                            broadcastMultiHopPresence()
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        if (b0 == 0x56.toByte() && b1 == 0x46.toByte()) {
+            incomingVideoChannel.trySend(body)
+            return
+        }
+
+        if (b0 == 0x41.toByte() && b1 == 0x46.toByte()) {
+            incomingAudioChannel.trySend(body)
+            return
+        }
+
+        if (b0 == 0x4D.toByte() && b1 == 0x50.toByte()) {
+            val pkt = MeshPacket.fromByteArray(body) ?: return
+            if (pkt.sourceNodeId == localNodeId) return
+            handleIncomingBytes("global-${pkt.sourceNodeId}", body)
+        }
+    }
+
+    private fun buildMqttConnectPacket(clientId: String): ByteArray {
+        val cidBytes = clientId.toByteArray(Charsets.UTF_8)
+        val varHeader = byteArrayOf(
+            0x00, 0x04,
+            0x4D, 0x51, 0x54, 0x54,
+            0x04,
+            0x02,
+            0x00, 0x3C
+        )
+        val remLen = varHeader.size + 2 + cidBytes.size
+        val out = ByteArrayOutputStream(5 + remLen)
+        out.write(0x10)
+        writeMqttRemainingLength(out, remLen)
+        out.write(varHeader)
+        out.write((cidBytes.size / 256) and 0xFF)
+        out.write(cidBytes.size and 0xFF)
+        out.write(cidBytes)
+        return out.toByteArray()
+    }
+
+    private fun buildMqttSubscribePacket(topic: String): ByteArray {
+        val topicBytes = topic.toByteArray(Charsets.UTF_8)
+        val remLen = 2 + 2 + topicBytes.size + 1
+        val out = ByteArrayOutputStream(5 + remLen)
+        out.write(0x82)
+        writeMqttRemainingLength(out, remLen)
+        out.write(0x00)
+        out.write(0x01)
+        out.write((topicBytes.size / 256) and 0xFF)
+        out.write(topicBytes.size and 0xFF)
+        out.write(topicBytes)
+        out.write(0x00)
+        return out.toByteArray()
+    }
+
+    private fun writeMqttRemainingLength(out: ByteArrayOutputStream, length: Int) {
+        var x = length
+        do {
+            var enc = x % 128
+            x /= 128
+            if (x in 1..Int.MAX_VALUE) {
+                enc = enc or 128
+            }
+            out.write(enc)
+        } while (x in 1..Int.MAX_VALUE)
+    }
+
+    private fun readMqttRemainingLength(dis: DataInputStream): Int {
+        var multiplier = 1
+        var value = 0
+        while (true) {
+            val encodedByte = dis.readByte().toInt() and 0xFF
+            value += (encodedByte and 127) * multiplier
+            if ((encodedByte and 128) == 0) break
+            multiplier *= 128
+            if (multiplier in (128 * 128 * 128 + 1)..Int.MAX_VALUE) break
+        }
+        return value
+    }
+
     private fun startMediaSenderWorkers() {
-        // Real-Time Zero-Queue Video Worker with Receiver ACK Flow Control
         scope.launch(Dispatchers.IO) {
             for (rawFrame in outgoingVideoChannel) {
                 try {
@@ -206,12 +509,10 @@ class NearbyConnectionsManager(private val context: Context) {
                     System.arraycopy(header, 0, framedPacket, 0, header.size)
                     System.arraycopy(rawFrame, 0, framedPacket, header.size, rawFrame.size)
 
-                    // 1. Send over UDP if any peer IP is known
                     if (knownLanPeerIps.isNotEmpty()) {
                         sendUdpFastFrame(0x56.toByte(), 0x46.toByte(), rawFrame, includeBroadcast = false)
                     }
 
-                    // 2. Send over LAN TCP sockets if any exist
                     val activeLan = lanOutputs.entries.toList()
                     for ((epId, dos) in activeLan) {
                         try {
@@ -227,14 +528,16 @@ class NearbyConnectionsManager(private val context: Context) {
                         }
                     }
 
-                    // 3. Always send over Direct Nearby Connections with strict In-Flight ACK control
+                    if (_isGlobalBridgeConnected.value && _connectedPeers.value.keys.any { it.startsWith("global-") }) {
+                        outgoingGlobalChannel.trySend(framedPacket)
+                    }
+
                     val nearbyEndpoints = _connectedPeers.value.values
                         .map { it.endpointId }
-                        .filter { !it.startsWith("lan-") }
+                        .filter { !it.startsWith("lan-") && !it.startsWith("global-") }
                         .distinct()
 
                     if (nearbyEndpoints.isNotEmpty() && framedPacket.size in 1..32000) {
-                        // Wait briefly if 2 frames are already in flight so GmsCore NEVER queues old frames
                         var waited = 0
                         while (unackedVideoFrames.get() in 2..Int.MAX_VALUE && waited in 0..32) {
                             delay(10)
@@ -244,7 +547,6 @@ class NearbyConnectionsManager(private val context: Context) {
                             unackedVideoFrames.set(1)
                         }
 
-                        // Grab the newest frame if a fresher one arrived while waiting for ACK
                         val latestFrame = outgoingVideoChannel.tryReceive().getOrNull() ?: rawFrame
                         val finalPacket = if (latestFrame !== rawFrame) {
                             ByteArray(header.size + latestFrame.size).also { pkt ->
@@ -275,7 +577,6 @@ class NearbyConnectionsManager(private val context: Context) {
             }
         }
 
-        // Real-Time Audio Worker (Always delivers to Nearby & LAN)
         scope.launch(Dispatchers.IO) {
             for (audioBytes in outgoingAudioChannel) {
                 try {
@@ -284,10 +585,8 @@ class NearbyConnectionsManager(private val context: Context) {
                     System.arraycopy(header, 0, framedPacket, 0, header.size)
                     System.arraycopy(audioBytes, 0, framedPacket, header.size, audioBytes.size)
 
-                    // 1. Send over UDP
                     sendUdpFastFrame(0x41.toByte(), 0x46.toByte(), audioBytes, includeBroadcast = true)
 
-                    // 2. Send over LAN TCP sockets
                     val activeLan = lanOutputs.entries.toList()
                     for ((epId, dos) in activeLan) {
                         try {
@@ -303,10 +602,13 @@ class NearbyConnectionsManager(private val context: Context) {
                         }
                     }
 
-                    // 3. Always send over Direct Nearby Connections
+                    if (_isGlobalBridgeConnected.value && _connectedPeers.value.keys.any { it.startsWith("global-") }) {
+                        outgoingGlobalChannel.trySend(framedPacket)
+                    }
+
                     val nearbyEndpoints = _connectedPeers.value.values
                         .map { it.endpointId }
-                        .filter { !it.startsWith("lan-") }
+                        .filter { !it.startsWith("lan-") && !it.startsWith("global-") }
                         .distinct()
 
                     if (nearbyEndpoints.isNotEmpty() && framedPacket.size in 1..32000) {
@@ -342,7 +644,8 @@ class NearbyConnectionsManager(private val context: Context) {
 
     fun getPrimaryLocalIp(): String {
         val ips = getLocalIPv4Addresses()
-        return ips.firstOrNull() ?: "اتصال مباشر P2P"
+        val baseIp = ips.firstOrNull() ?: "اتصال مباشر P2P"
+        return if (_isGlobalBridgeConnected.value) "$baseIp + جسر دولي تلقائي 🌍" else baseIp
     }
 
     fun addGatewayIp(rawIp: String) {
@@ -555,7 +858,6 @@ class NearbyConnectionsManager(private val context: Context) {
             var tick = 0
             while (isLanRunning && isActive) {
                 try {
-                    // Skip heavy background scanning while in an active video/voice call
                     if (!isHighSpeedCallMode.get()) {
                         val beaconText = listOf("CMESH", localNodeId, localNodeName, LAN_TCP_PORT.toString()).joinToString(sepChar.toString())
                         val beaconBytes = beaconText.toByteArray(Charsets.UTF_8)
@@ -595,9 +897,11 @@ class NearbyConnectionsManager(private val context: Context) {
 
     private fun stopLanEngine() {
         isLanRunning = false
+        _isGlobalBridgeConnected.value = false
         try { multicastLock?.let { if (it.isHeld) it.release() } } catch (e: Exception) {}
         try { udpSocket?.close() } catch (e: Exception) {}
         try { tcpServer?.close() } catch (e: Exception) {}
+        try { globalRelaySocket?.close() } catch (e: Exception) {}
         synchronized(lanOutputs) {
             lanOutputs.values.forEach { try { it.close() } catch (e: Exception) {} }
             lanOutputs.clear()
@@ -757,7 +1061,7 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     fun requestConnection(endpointId: String) {
-        if (endpointId.startsWith("lan-")) return
+        if (endpointId.startsWith("lan-") || endpointId.startsWith("global-")) return
         connectionsClient.requestConnection(localNodeName, endpointId, connectionLifecycleCallback)
     }
 
@@ -766,7 +1070,7 @@ class NearbyConnectionsManager(private val context: Context) {
             val ip = endpointId.removePrefix("lan-")
             knownLanPeerIps.remove(ip)
             lanOutputs.remove(endpointId)?.let { try { it.close() } catch (e: Exception) {} }
-        } else {
+        } else if (!endpointId.startsWith("global-")) {
             connectionsClient.disconnectFromEndpoint(endpointId)
         }
         _connectedPeers.value = _connectedPeers.value - endpointId
@@ -778,7 +1082,7 @@ class NearbyConnectionsManager(private val context: Context) {
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
             destinationNodeId = "*",
-            ttl = 6,
+            ttl = DEFAULT_MESH_TTL,
             hopCount = 0,
             packetType = PacketType.KEY_EXCHANGE,
             payloadCiphertext = CryptoManager.localPublicKeyBase64,
@@ -793,7 +1097,7 @@ class NearbyConnectionsManager(private val context: Context) {
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
             destinationNodeId = "*",
-            ttl = 6,
+            ttl = DEFAULT_MESH_TTL,
             hopCount = 0,
             packetType = PacketType.KEY_EXCHANGE,
             payloadCiphertext = CryptoManager.localPublicKeyBase64,
@@ -810,9 +1114,9 @@ class NearbyConnectionsManager(private val context: Context) {
             if (peer.endpointId != targetEndpointId && pubKey.isNotEmpty()) {
                 val gossipPacket = MeshPacket(
                     sourceNodeId = peer.nodeId,
-                    sourceNodeName = peer.nodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", ""),
+                    sourceNodeName = peer.nodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "").replace(" (دولي 🌍)", ""),
                     destinationNodeId = "*",
-                    ttl = 5,
+                    ttl = DEFAULT_MESH_TTL,
                     hopCount = peer.hops,
                     relayedBy = listOf(localNodeName),
                     packetType = PacketType.KEY_EXCHANGE,
@@ -829,7 +1133,6 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     private fun handleIncomingBytes(incomingEndpointId: String, bytes: ByteArray) {
-        // Video Frame ACK received -> immediately unlock sender for next live frame
         if (bytes.size == 2 && bytes[0] == 0x56.toByte() && bytes[1] == 0x41.toByte()) {
             val current = unackedVideoFrames.decrementAndGet()
             if (current in Int.MIN_VALUE..0) {
@@ -838,10 +1141,9 @@ class NearbyConnectionsManager(private val context: Context) {
             return
         }
 
-        // Video Frame received -> push to screen AND send 2-byte ACK back to sender immediately
         if (bytes.size in 4..Int.MAX_VALUE && bytes[0] == 0x56.toByte() && bytes[1] == 0x46.toByte()) {
             incomingVideoChannel.trySend(bytes.copyOfRange(2, bytes.size))
-            if (!incomingEndpointId.startsWith("lan-")) {
+            if (!incomingEndpointId.startsWith("lan-") && !incomingEndpointId.startsWith("global-")) {
                 try {
                     connectionsClient.sendPayload(incomingEndpointId, Payload.fromBytes(videoAckBytes))
                 } catch (e: Exception) {}
@@ -849,7 +1151,6 @@ class NearbyConnectionsManager(private val context: Context) {
             return
         }
 
-        // Audio Frame received
         if (bytes.size in 4..Int.MAX_VALUE && bytes[0] == 0x41.toByte() && bytes[1] == 0x46.toByte()) {
             incomingAudioChannel.trySend(bytes.copyOfRange(2, bytes.size))
             return
@@ -907,11 +1208,13 @@ class NearbyConnectionsManager(private val context: Context) {
             val sharedKey = CryptoManager.deriveSharedSecretFromBase64(peerPubKeyBase64)
             peerSessionKeys[packet.sourceNodeId] = sharedKey
 
-            val hopsCount = packet.hopCount + 1
-            if (hopsCount == 1) {
+            val isGlobal = incomingEndpointId.startsWith("global-")
+            val hopsCount = if (isGlobal) maxOf(2, packet.hopCount + 1) else packet.hopCount + 1
+
+            if (hopsCount == 1 && !isGlobal) {
                 peerSessionKeys[incomingEndpointId] = sharedKey
                 val existing = _connectedPeers.value[incomingEndpointId]
-                val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "")
+                val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "").replace(" (دولي 🌍)", "")
                 val displayName = if (incomingEndpointId.startsWith("lan-")) "$cleanName (Wi-Fi)" else cleanName
                 val updated = PeerNode(
                     endpointId = incomingEndpointId,
@@ -928,19 +1231,21 @@ class NearbyConnectionsManager(private val context: Context) {
             } else {
                 val alreadyDirect = _connectedPeers.value.values.any { it.nodeId == packet.sourceNodeId && it.isDirect }
                 if (!alreadyDirect) {
-                    val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "")
+                    val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "").replace(" (دولي 🌍)", "")
+                    val label = if (isGlobal) "$cleanName (دولي 🌍)" else "$cleanName (عبر $hopsCount قفزات)"
+                    val keyId = if (isGlobal) "global-${packet.sourceNodeId}" else packet.sourceNodeId
                     val multiHopPeer = PeerNode(
                         endpointId = incomingEndpointId,
                         nodeId = packet.sourceNodeId,
-                        nodeName = "$cleanName (عبر $hopsCount قفزات)",
+                        nodeName = label,
                         publicKeyBase64 = peerPubKeyBase64,
                         fingerprint = packet.extraMeta ?: CryptoManager.computeFingerprint(sharedKey.encoded),
                         isConnected = true,
                         isDirect = false,
                         hops = hopsCount,
-                        signalStrengthDbm = -65
+                        signalStrengthDbm = if (isGlobal) -50 else -65
                     )
-                    _connectedPeers.value = _connectedPeers.value + (packet.sourceNodeId to multiHopPeer)
+                    _connectedPeers.value = _connectedPeers.value + (keyId to multiHopPeer)
                 }
             }
         } catch (e: Exception) {}
@@ -955,10 +1260,19 @@ class NearbyConnectionsManager(private val context: Context) {
         val packetBytes = relayedPacket.toByteArray()
         val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
         for (endpointId in distinctEndpoints) {
-            if (endpointId != arrivedFromEndpoint) {
+            if (endpointId != arrivedFromEndpoint && !endpointId.startsWith("global-")) {
                 sendReliablePacketToEndpoint(endpointId, packetBytes)
             }
         }
+
+        if (!arrivedFromEndpoint.startsWith("global-") && _isGlobalBridgeConnected.value) {
+            val framed = ByteArray(2 + packetBytes.size)
+            framed[0] = 0x4D.toByte()
+            framed[1] = 0x50.toByte()
+            System.arraycopy(packetBytes, 0, framed, 2, packetBytes.size)
+            outgoingGlobalChannel.trySend(framed)
+        }
+
         _packetsForwardedCount.value += 1
     }
 
@@ -977,20 +1291,41 @@ class NearbyConnectionsManager(private val context: Context) {
 
     fun sendMeshPacket(packet: MeshPacket) {
         markPacketSeen(packet.packetId)
-        val elevatedPacket = if (packet.ttl in 1..5) packet.copy(ttl = DEFAULT_MESH_TTL) else packet
+        val elevatedPacket = if (packet.ttl in 1..15) packet.copy(ttl = DEFAULT_MESH_TTL) else packet
         val bytes = elevatedPacket.toByteArray()
 
         scope.launch {
             sendUdpFastFrame(0x4D.toByte(), 0x50.toByte(), bytes, includeBroadcast = true)
         }
 
-        val activeEndpoints = (_connectedPeers.value.keys + _connectedPeers.value.values.map { it.endpointId } + lanOutputs.keys).distinct()
+        if (_isGlobalBridgeConnected.value) {
+            val framed = ByteArray(2 + bytes.size)
+            framed[0] = 0x4D.toByte()
+            framed[1] = 0x50.toByte()
+            System.arraycopy(bytes, 0, framed, 2, bytes.size)
+            outgoingGlobalChannel.trySend(framed)
+        }
+
+        val activeEndpoints = (_connectedPeers.value.keys + _connectedPeers.value.values.map { it.endpointId } + lanOutputs.keys)
+            .filter { !it.startsWith("global-") }
+            .distinct()
         for (endpointId in activeEndpoints) {
             sendReliablePacketToEndpoint(endpointId, bytes)
         }
     }
 
     private fun sendReliablePacketToEndpoint(endpointId: String, bytes: ByteArray) {
+        if (endpointId.startsWith("global-")) {
+            if (_isGlobalBridgeConnected.value) {
+                val framed = ByteArray(2 + bytes.size)
+                framed[0] = 0x4D.toByte()
+                framed[1] = 0x50.toByte()
+                System.arraycopy(bytes, 0, framed, 2, bytes.size)
+                outgoingGlobalChannel.trySend(framed)
+            }
+            return
+        }
+
         val lanOut = lanOutputs[endpointId]
         if (lanOut != null) {
             scope.launch {
@@ -1079,20 +1414,22 @@ class NearbyConnectionsManager(private val context: Context) {
             return
         }
 
-        try {
-            val filePayload = Payload.fromFile(file)
-            val updatedHeader = header.copy(payloadId = filePayload.id)
-            val headerPacket = MeshPacket(
-                sourceNodeId = localNodeId,
-                sourceNodeName = localNodeName,
-                destinationNodeId = resolvedEndpoint,
-                ttl = 1,
-                packetType = PacketType.MEDIA_HEADER,
-                payloadCiphertext = updatedHeader.toJson(),
-                extraMeta = updatedHeader.toJson()
-            )
-            sendReliablePacketToEndpoint(resolvedEndpoint, headerPacket.toByteArray())
-            connectionsClient.sendPayload(resolvedEndpoint, filePayload)
-        } catch (e: Exception) {}
+        if (!resolvedEndpoint.startsWith("global-")) {
+            try {
+                val filePayload = Payload.fromFile(file)
+                val updatedHeader = header.copy(payloadId = filePayload.id)
+                val headerPacket = MeshPacket(
+                    sourceNodeId = localNodeId,
+                    sourceNodeName = localNodeName,
+                    destinationNodeId = resolvedEndpoint,
+                    ttl = 1,
+                    packetType = PacketType.MEDIA_HEADER,
+                    payloadCiphertext = updatedHeader.toJson(),
+                    extraMeta = updatedHeader.toJson()
+                )
+                sendReliablePacketToEndpoint(resolvedEndpoint, headerPacket.toByteArray())
+                connectionsClient.sendPayload(resolvedEndpoint, filePayload)
+            } catch (e: Exception) {}
+        }
     }
 }

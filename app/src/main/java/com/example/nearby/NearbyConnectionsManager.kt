@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.wifi.WifiManager
 import android.os.ParcelFileDescriptor
-import android.util.Log
 import com.example.crypto.CryptoManager
 import com.example.mesh.MediaHeader
 import com.example.mesh.MediaType
@@ -60,7 +59,6 @@ import javax.crypto.SecretKey
 class NearbyConnectionsManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "NearbyManager"
         private const val SERVICE_ID = "com.example.ciphermesh.p2p"
         val STRATEGY: Strategy = Strategy.P2P_CLUSTER
         private const val MAX_SEEN_PACKETS = 8000
@@ -150,7 +148,6 @@ class NearbyConnectionsManager(private val context: Context) {
         .shareIn(scope, SharingStarted.Eagerly, replay = 0)
 
     private val seenPacketIds = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
-
     private val dummyOut = DataOutputStream(ByteArrayOutputStream())
     private val lanOutputs = Collections.synchronizedMap(mutableMapOf("init" to dummyOut).apply { clear() })
     private val knownLanPeerIps = Collections.synchronizedSet(mutableSetOf("init").apply { clear() })
@@ -338,9 +335,7 @@ class NearbyConnectionsManager(private val context: Context) {
                     knownLanPeerIps.add(ip)
                     handleLanSocket(client, "lan-$ip", "lan-$ip", "WiFi-$ip")
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "LAN TCP Server err: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
 
         scope.launch {
@@ -353,8 +348,6 @@ class NearbyConnectionsManager(private val context: Context) {
                     bind(InetSocketAddress(LAN_UDP_PORT))
                 }
                 val buf = ByteArray(65000)
-                val localIpsCache = getLocalIPv4Addresses().toSet()
-
                 while (isLanRunning) {
                     val pkt = DatagramPacket(buf, buf.size)
                     udpSocket?.receive(pkt) ?: break
@@ -362,28 +355,23 @@ class NearbyConnectionsManager(private val context: Context) {
                     if (len in 0..3) continue
 
                     val senderIp = pkt.address.hostAddress ?: continue
-                    if (localIpsCache.contains(senderIp) || getLocalIPv4Addresses().contains(senderIp)) {
-                        continue
-                    }
+                    if (getLocalIPv4Addresses().contains(senderIp)) continue
 
                     val b0 = pkt.data[0]
                     val b1 = pkt.data[1]
 
-                    // Fast UDP Video Frame ('V', 'F')
                     if (b0 == 0x56.toByte() && b1 == 0x46.toByte()) {
                         knownLanPeerIps.add(senderIp)
                         _incomingVideoFrames.value = pkt.data.copyOfRange(2, len)
                         continue
                     }
 
-                    // Fast UDP Audio Frame ('A', 'F')
                     if (b0 == 0x41.toByte() && b1 == 0x46.toByte()) {
                         knownLanPeerIps.add(senderIp)
                         _incomingAudioPackets.value = pkt.data.copyOfRange(2, len)
                         continue
                     }
 
-                    // Fast UDP Mesh Chat/Signal Packet ('M', 'P')
                     if (b0 == 0x4D.toByte() && b1 == 0x50.toByte()) {
                         knownLanPeerIps.add(senderIp)
                         val meshBytes = pkt.data.copyOfRange(2, len)
@@ -404,9 +392,7 @@ class NearbyConnectionsManager(private val context: Context) {
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "LAN UDP Listener err: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
 
         scope.launch {
@@ -425,10 +411,6 @@ class NearbyConnectionsManager(private val context: Context) {
                         val parts = ip.split(".")
                         if (parts.size == 4) {
                             val prefix = "${parts[0]}.${parts[1]}.${parts[2]}."
-                            try {
-                                sender.send(DatagramPacket(beaconBytes, beaconBytes.size, InetAddress.getByName("${prefix}255"), LAN_UDP_PORT))
-                            } catch (e: Exception) {}
-
                             val commonPrefixes = listOf(prefix, "192.168.43.", "192.168.49.", "192.168.1.", "192.168.0.", "10.0.0.").distinct()
                             for (pfx in commonPrefixes) {
                                 try {
@@ -451,7 +433,6 @@ class NearbyConnectionsManager(private val context: Context) {
                     if (tick % 3 == 0 && _connectedPeers.value.isNotEmpty()) {
                         broadcastMultiHopPresence()
                     }
-
                     tick += 1
                 } catch (e: Exception) {}
                 delay(2500)
@@ -493,13 +474,10 @@ class NearbyConnectionsManager(private val context: Context) {
     }
 
     private fun onLanPeerDiscovered(ip: String, peerNodeId: String, peerName: String) {
-        val localIps = getLocalIPv4Addresses()
-        if (localIps.contains(ip)) return
-
+        if (getLocalIPv4Addresses().contains(ip)) return
         knownLanPeerIps.add(ip)
         val endpointId = "lan-$ip"
-        val alreadyConnected = lanOutputs.containsKey(endpointId)
-        if (alreadyConnected || !connectingLanIps.add(ip)) return
+        if (lanOutputs.containsKey(endpointId) || !connectingLanIps.add(ip)) return
 
         scope.launch {
             try {
@@ -705,7 +683,6 @@ class NearbyConnectionsManager(private val context: Context) {
         if (packet.sourceNodeId == localNodeId) return
 
         _packetsReceivedCount.value += 1
-
         if (!markPacketSeen(packet.packetId)) return
 
         nextHopRoutes[packet.sourceNodeId] = incomingEndpointId
@@ -755,17 +732,11 @@ class NearbyConnectionsManager(private val context: Context) {
             peerSessionKeys[packet.sourceNodeId] = sharedKey
 
             val hopsCount = packet.hopCount + 1
-            val isDirectPeer = (hopsCount == 1)
-
-            if (isDirectPeer) {
+            if (hopsCount == 1) {
                 peerSessionKeys[incomingEndpointId] = sharedKey
                 val existing = _connectedPeers.value[incomingEndpointId]
                 val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "")
-                val displayName = if (incomingEndpointId.startsWith("lan-")) {
-                    "$cleanName (Wi-Fi)"
-                } else {
-                    cleanName
-                }
+                val displayName = if (incomingEndpointId.startsWith("lan-")) "$cleanName (Wi-Fi)" else cleanName
                 val updated = PeerNode(
                     endpointId = incomingEndpointId,
                     nodeId = packet.sourceNodeId,
@@ -781,4 +752,263 @@ class NearbyConnectionsManager(private val context: Context) {
             } else {
                 val alreadyDirect = _connectedPeers.value.values.any { it.nodeId == packet.sourceNodeId && it.isDirect }
                 if (!alreadyDirect) {
-                    val cleanName = packet.sourceNodeName
+                    val cleanName = packet.sourceNodeName.replace(" (Wi-Fi)", "").replace(" (تلقائي)", "")
+                    val multiHopPeer = PeerNode(
+                        endpointId = incomingEndpointId,
+                        nodeId = packet.sourceNodeId,
+                        nodeName = "$cleanName (عبر $hopsCount قفزات)",
+                        publicKeyBase64 = peerPubKeyBase64,
+                        fingerprint = packet.extraMeta ?: CryptoManager.computeFingerprint(sharedKey.encoded),
+                        isConnected = true,
+                        isDirect = false,
+                        hops = hopsCount,
+                        signalStrengthDbm = -65
+                    )
+                    _connectedPeers.value = _connectedPeers.value + (packet.sourceNodeId to multiHopPeer)
+                }
+            }
+        } catch (e: Exception) {}
+    }
+
+    private fun relayPacket(packet: MeshPacket, arrivedFromEndpoint: String) {
+        val relayedPacket = packet.copy(
+            ttl = packet.ttl - 1,
+            hopCount = packet.hopCount + 1,
+            relayedBy = packet.relayedBy + localNodeName
+        )
+        val packetBytes = relayedPacket.toByteArray()
+        val distinctEndpoints = _connectedPeers.value.values.map { it.endpointId }.distinct()
+        for (endpointId in distinctEndpoints) {
+            if (endpointId != arrivedFromEndpoint) {
+                sendReliablePacketToEndpoint(endpointId, packetBytes)
+            }
+        }
+        _packetsForwardedCount.value += 1
+    }
+
+    private fun sendDeliveryAck(receivedPacket: MeshPacket) {
+        val ackPacket = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = receivedPacket.sourceNodeId,
+            ttl = DEFAULT_MESH_TTL,
+            packetType = PacketType.DELIVERY_ACK,
+            payloadCiphertext = receivedPacket.packetId,
+            extraMeta = "ACK"
+        )
+        sendMeshPacket(ackPacket)
+    }
+
+    fun sendMeshPacket(packet: MeshPacket) {
+        markPacketSeen(packet.packetId)
+        val elevatedPacket = if (packet.ttl in 1..5) packet.copy(ttl = DEFAULT_MESH_TTL) else packet
+        val bytes = elevatedPacket.toByteArray()
+
+        scope.launch {
+            sendUdpFastFrame(0x4D.toByte(), 0x50.toByte(), bytes, includeBroadcast = true)
+        }
+
+        val activeEndpoints = (_connectedPeers.value.values.map { it.endpointId } + lanOutputs.keys).distinct()
+        for (endpointId in activeEndpoints) {
+            sendReliablePacketToEndpoint(endpointId, bytes)
+        }
+    }
+
+    private fun sendReliablePacketToEndpoint(endpointId: String, bytes: ByteArray) {
+        val lanOut = lanOutputs[endpointId]
+        if (lanOut != null) {
+            scope.launch {
+                try {
+                    synchronized(lanOut) {
+                        lanOut.writeByte(1)
+                        lanOut.writeInt(bytes.size)
+                        lanOut.write(bytes)
+                        lanOut.flush()
+                    }
+                } catch (e: Exception) {
+                    lanOutputs.remove(endpointId)
+                    try { lanOut.close() } catch (ex: Exception) {}
+                }
+            }
+            return
+        }
+
+        if (!endpointId.startsWith("lan-") && bytes.size in 1..32000) {
+            try {
+                connectionsClient.sendPayload(endpointId, Payload.fromBytes(bytes))
+            } catch (e: Exception) {}
+        }
+    }
+
+    private fun sendUdpFastFrame(b0: Byte, b1: Byte, payloadBytes: ByteArray, includeBroadcast: Boolean) {
+        if (payloadBytes.size !in 1..60000) return
+        val sock = udpSocket ?: return
+        try {
+            val packetData = ByteArray(2 + payloadBytes.size)
+            packetData[0] = b0
+            packetData[1] = b1
+            System.arraycopy(payloadBytes, 0, packetData, 2, payloadBytes.size)
+
+            val targets = knownLanPeerIps.toSet()
+            for (ip in targets) {
+                try {
+                    val dgram = DatagramPacket(packetData, packetData.size, InetAddress.getByName(ip), LAN_UDP_PORT)
+                    sock.send(dgram)
+                } catch (e: Exception) {}
+            }
+
+            if (includeBroadcast) {
+                val localIps = getLocalIPv4Addresses()
+                for (ip in localIps) {
+                    val parts = ip.split(".")
+                    if (parts.size == 4) {
+                        val bcastIp = "${parts[0]}.${parts[1]}.${parts[2]}.255"
+                        try {
+                            val dgram = DatagramPacket(packetData, packetData.size, InetAddress.getByName(bcastIp), LAN_UDP_PORT)
+                            sock.send(dgram)
+                        } catch (e: Exception) {}
+                    }
+                }
+            }
+        } catch (e: Exception) {}
+    }
+
+    fun sendDirectVideoFrame(frameBytes: ByteArray) {
+        val now = System.currentTimeMillis()
+        if (isVideoSendBusy.get() && (now - lastVideoSendTime.get()) in 0L..800L) {
+            return
+        }
+        isVideoSendBusy.set(true)
+        lastVideoSendTime.set(now)
+
+        scope.launch {
+            try {
+                val safeFrame = if (frameBytes.size in 24000..Int.MAX_VALUE) {
+                    try {
+                        val bmp = BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
+                        val out = ByteArrayOutputStream()
+                        bmp?.compress(Bitmap.CompressFormat.JPEG, 30, out)
+                        out.toByteArray().takeIf { it.isNotEmpty() } ?: frameBytes
+                    } catch (e: Exception) {
+                        frameBytes
+                    }
+                } else {
+                    frameBytes
+                }
+
+                sendUdpFastFrame(0x56.toByte(), 0x46.toByte(), safeFrame, includeBroadcast = knownLanPeerIps.isEmpty())
+
+                val header = byteArrayOf(0x56.toByte(), 0x46.toByte())
+                val packet = ByteArray(header.size + safeFrame.size)
+                System.arraycopy(header, 0, packet, 0, header.size)
+                System.arraycopy(safeFrame, 0, packet, header.size, safeFrame.size)
+
+                val nearbyEndpoints = _connectedPeers.value.values
+                    .map { it.endpointId }
+                    .filter { !it.startsWith("lan-") }
+                    .distinct()
+
+                if (nearbyEndpoints.isNotEmpty() && packet.size in 1..32000) {
+                    for (endpointId in nearbyEndpoints) {
+                        try {
+                            connectionsClient.sendPayload(endpointId, Payload.fromBytes(packet))
+                                .addOnCompleteListener { isVideoSendBusy.set(false) }
+                        } catch (e: Exception) {
+                            isVideoSendBusy.set(false)
+                        }
+                    }
+                } else {
+                    isVideoSendBusy.set(false)
+                }
+            } catch (e: Exception) {
+                isVideoSendBusy.set(false)
+            }
+        }
+    }
+
+    fun sendDirectAudioFrame(audioBytes: ByteArray) {
+        val now = System.currentTimeMillis()
+        if (isAudioSendBusy.get() && (now - lastAudioSendTime.get()) in 0L..500L) {
+            return
+        }
+        isAudioSendBusy.set(true)
+        lastAudioSendTime.set(now)
+
+        scope.launch {
+            try {
+                sendUdpFastFrame(0x41.toByte(), 0x46.toByte(), audioBytes, includeBroadcast = knownLanPeerIps.isEmpty())
+
+                val header = byteArrayOf(0x41.toByte(), 0x46.toByte())
+                val packet = ByteArray(header.size + audioBytes.size)
+                System.arraycopy(header, 0, packet, 0, header.size)
+                System.arraycopy(audioBytes, 0, packet, header.size, audioBytes.size)
+
+                val nearbyEndpoints = _connectedPeers.value.values
+                    .map { it.endpointId }
+                    .filter { !it.startsWith("lan-") }
+                    .distinct()
+
+                if (nearbyEndpoints.isNotEmpty() && packet.size in 1..32000) {
+                    for (endpointId in nearbyEndpoints) {
+                        try {
+                            connectionsClient.sendPayload(endpointId, Payload.fromBytes(packet))
+                                .addOnCompleteListener { isAudioSendBusy.set(false) }
+                        } catch (e: Exception) {
+                            isAudioSendBusy.set(false)
+                        }
+                    }
+                } else {
+                    isAudioSendBusy.set(false)
+                }
+            } catch (e: Exception) {
+                isAudioSendBusy.set(false)
+            }
+        }
+    }
+
+    fun sendFile(targetEndpointId: String, file: File, header: MediaHeader) {
+        val resolvedEndpoint = nextHopRoutes[targetEndpointId] ?: targetEndpointId
+        val lanOut = lanOutputs[resolvedEndpoint] ?: lanOutputs.values.firstOrNull()
+        if (lanOut != null) {
+            scope.launch {
+                try {
+                    val headerBytes = header.toJson().toByteArray(Charsets.UTF_8)
+                    synchronized(lanOut) {
+                        lanOut.writeByte(2)
+                        lanOut.writeInt(headerBytes.size)
+                        lanOut.write(headerBytes)
+                        lanOut.writeLong(file.length())
+                        FileInputStream(file).use { fis ->
+                            val buf = ByteArray(16384)
+                            while (true) {
+                                val read = fis.read(buf)
+                                if (read == -1) break
+                                lanOut.write(buf, 0, read)
+                            }
+                        }
+                        lanOut.flush()
+                    }
+                } catch (e: Exception) {
+                    lanOutputs.entries.removeIf { it.value == lanOut }
+                }
+            }
+            return
+        }
+
+        try {
+            val filePayload = Payload.fromFile(file)
+            val updatedHeader = header.copy(payloadId = filePayload.id)
+            val headerPacket = MeshPacket(
+                sourceNodeId = localNodeId,
+                sourceNodeName = localNodeName,
+                destinationNodeId = resolvedEndpoint,
+                ttl = 1,
+                packetType = PacketType.MEDIA_HEADER,
+                payloadCiphertext = updatedHeader.toJson(),
+                extraMeta = updatedHeader.toJson()
+            )
+            sendReliablePacketToEndpoint(resolvedEndpoint, headerPacket.toByteArray())
+            connectionsClient.sendPayload(resolvedEndpoint, filePayload)
+        } catch (e: Exception) {}
+    }
+}

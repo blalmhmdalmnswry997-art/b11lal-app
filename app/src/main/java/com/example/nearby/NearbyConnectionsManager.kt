@@ -67,6 +67,9 @@ class NearbyConnectionsManager(private val context: Context) {
         private const val DEFAULT_MESH_TTL = 12
     }
 
+    private val sepChar = Char(124)
+    private val cmeshPrefix = "CMESH" + sepChar
+
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = context.getSharedPreferences("ciphermesh_network_prefs", Context.MODE_PRIVATE)
@@ -380,8 +383,8 @@ class NearbyConnectionsManager(private val context: Context) {
                     }
 
                     val msg = String(pkt.data, 0, len, Charsets.UTF_8)
-                    if (msg.startsWith("CMESH|")) {
-                        val parts = msg.split("|")
+                    if (msg.startsWith(cmeshPrefix)) {
+                        val parts = msg.split(sepChar)
                         if (parts.size in 3..10) {
                             val peerNodeId = parts[1]
                             val peerName = parts[2]
@@ -399,7 +402,8 @@ class NearbyConnectionsManager(private val context: Context) {
             var tick = 0
             while (isLanRunning) {
                 try {
-                    val beaconBytes = "CMESH|$localNodeId|$localNodeName\vert{}$LAN_TCP_PORT".toByteArray(Charsets.UTF_8)
+                    val beaconText = listOf("CMESH", localNodeId, localNodeName, LAN_TCP_PORT.toString()).joinToString(sepChar.toString())
+                    val beaconBytes = beaconText.toByteArray(Charsets.UTF_8)
                     val sender = udpSocket ?: DatagramSocket().apply { broadcast = true }
 
                     try {

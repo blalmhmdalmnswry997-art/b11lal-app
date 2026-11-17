@@ -12,7 +12,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,7 +36,6 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Hub
@@ -101,7 +99,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val nullStringVal: String? = null
+private val nullStrVal: String? = null
+private val newlineChar = Char(10)
 
 @Composable
 fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
@@ -119,18 +118,28 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
 
     val translatedMessages by viewModel.translatedMessages.collectAsState()
     val pinnedMessages by viewModel.pinnedMessages.collectAsState()
+    val stegoSecrets by viewModel.stegoSecrets.collectAsState()
+    val revealedStegoIds by viewModel.revealedStegoIds.collectAsState()
     val isSelfDestructEnabled by viewModel.isSelfDestructEnabled.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
-    var selectedMessageId by remember { mutableStateOf(nullStringVal) }
-    var editingMessageId by remember { mutableStateOf(nullStringVal) }
+    var selectedMessageId by remember { mutableStateOf(nullStrVal) }
+    var editingMessageId by remember { mutableStateOf(nullStrVal) }
     var editingTextValue by remember { mutableStateOf("") }
-    var replyQuoteText by remember { mutableStateOf(nullStringVal) }
-    var replyQuoteSender by remember { mutableStateOf(nullStringVal) }
+    var replyQuoteText by remember { mutableStateOf(nullStrVal) }
+    var replyQuoteSender by remember { mutableStateOf(nullStrVal) }
+
+    var showStegoDialog by remember { mutableStateOf(false) }
+    var stegoCoverInput by remember { mutableStateOf("السلام عليكم، الأمور طيبة إن شاء الله") }
+    var stegoSecretInput by remember { mutableStateOf("") }
+
+    var showVoucherDialog by remember { mutableStateOf(false) }
+    var voucherAmountInput by remember { mutableStateOf("") }
+    var voucherPurposeInput by remember { mutableStateOf("") }
 
     var isSearchActive by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
-    var fullScreenImagePath by remember { mutableStateOf(nullStringVal) }
+    var fullScreenImagePath by remember { mutableStateOf(nullStrVal) }
 
     val listState = rememberLazyListState()
 
@@ -141,6 +150,10 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "البث العام للشبكة" else "متصل-${selectedPeerId?.take(4)}"
     val isBroadcast = selectedPeerId == "*" || selectedPeerId == null
     val isVerified = selectedPeerId != null && verifiedPeers.contains(selectedPeerId)
+
+    val liveDistanceText = remember(connectedPeers, selectedPeerId) {
+        viewModel.getActivePeerDistanceText()
+    }
 
     val displayedMessages = remember(messages, searchQuery, isSearchActive) {
         if (!isSearchActive || searchQuery.isBlank()) {
@@ -156,8 +169,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             "📍 أين موقعك؟",
             "📞 اتصل بي الآن",
             "✅ أنا في الطريق",
-            "⏳ انتظر لحظة",
-            "🔒 الشبكة آمنة"
+            "⏳ انتظر لحظة"
         )
     }
 
@@ -179,7 +191,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     }
 
     Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
-        // Top Header Bar
+        // Top Header Bar with Live Distance Rangefinder
         Row(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -219,14 +231,10 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         }
                     }
                     Text(
-                        text = when {
-                            isSelfDestructEnabled -> "تدمير ذاتي للرسائل (60ث) نشط ⏱️"
-                            isBroadcast -> "بث شبكي متعدد القفزات"
-                            currentPeer != null -> "اتصال مباشر • مشفر AES-256"
-                            else -> "مزامنة ذكية عبر الشبكة"
-                        },
+                        text = "📏 $liveDistanceText",
                         fontSize = 11.sp,
-                        color = if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure
+                        color = if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
             }
@@ -261,7 +269,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // In-Chat Search Bar
         if (isSearchActive) {
             Row(
                 modifier = Modifier
@@ -288,7 +295,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Pinned Message Banner
         if (!currentPinnedText.isNullOrBlank()) {
             Row(
                 modifier = Modifier
@@ -331,14 +337,21 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             items(displayedMessages) { message ->
                 val isSelected = (selectedMessageId == message.id)
                 val translatedText = translatedMessages[message.id]
+                val secretStegoText = stegoSecrets[message.id]
+                val isStegoRevealed = revealedStegoIds.contains(message.id)
 
                 MessageBubble(
                     message = message,
                     isPlaying = playingMessageId == message.id,
                     isSelected = isSelected,
                     translatedText = translatedText,
+                    secretStegoText = secretStegoText,
+                    isStegoRevealed = isStegoRevealed,
                     onBubbleClick = {
                         selectedMessageId = if (selectedMessageId == message.id) null else message.id
+                    },
+                    onToggleStegoReveal = {
+                        viewModel.toggleRevealStegoMessage(message.id)
                     },
                     onPlayVoiceNote = { viewModel.playVoiceNote(message.id, message.mediaUri ?: "") },
                     onImageClick = { path -> fullScreenImagePath = path },
@@ -371,7 +384,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Quick Tactical Replies Bar
+        // Super-Power Exclusive Tools Bar + Quick Replies
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -381,6 +394,64 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // 1. Steganography Ghost Message Button
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(AmberMesh.copy(alpha = 0.18f))
+                    .border(1.dp, AmberMesh, RoundedCornerShape(14.dp))
+                    .clickable {
+                        stegoSecretInput = ""
+                        showStegoDialog = true
+                    }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "🕵️ رسالة مموهة",
+                    fontSize = 11.sp,
+                    color = AmberMesh,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // 2. Cryptographic Offline Digital Voucher Button
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(EmeraldSecure.copy(alpha = 0.18f))
+                    .border(1.dp, EmeraldSecure, RoundedCornerShape(14.dp))
+                    .clickable {
+                        voucherAmountInput = ""
+                        voucherPurposeInput = ""
+                        showVoucherDialog = true
+                    }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "💸 سند رقمي موثق",
+                    fontSize = 11.sp,
+                    color = EmeraldSecure,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // 3. Live Radar & Battery Telemetry Button
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(CyanPrimary.copy(alpha = 0.18f))
+                    .border(1.dp, CyanPrimary, RoundedCornerShape(14.dp))
+                    .clickable { viewModel.sendLiveTelemetryInActiveChat() }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "📡 نبض الحي والبطارية",
+                    fontSize = 11.sp,
+                    color = CyanPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
             for (quickText in quickReplies) {
                 Box(
                     modifier = Modifier
@@ -388,7 +459,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         .background(Color(0xFF132238))
                         .border(1.dp, CyanPrimary.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
                         .clickable { viewModel.sendTextMessage(quickText) }
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                 ) {
                     Text(
                         text = quickText,
@@ -400,7 +471,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Reply Quote Preview Banner
         if (!replyQuoteText.isNullOrBlank()) {
             Row(
                 modifier = Modifier
@@ -437,7 +507,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Bottom Input or Voice Recording Bar
         if (isRecordingVoice) {
             VoiceNoteRecordingBar(
                 durationSec = recordingDuration,
@@ -459,7 +528,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("اكتب رسالة مشفرة (أو اضغط على أي رسالة لترجمتها وتعديلها)...", color = Color(0xFF536B8D), fontSize = 12.sp) },
+                    placeholder = { Text("اكتب رسالة مشفرة...", color = Color(0xFF536B8D), fontSize = 12.sp) },
                     modifier = Modifier.weight(1f).testTag("message_input_field"),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -474,7 +543,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     keyboardActions = KeyboardActions(onSend = {
                         if (inputText.isNotBlank()) {
                             val finalMsg = if (!replyQuoteText.isNullOrBlank()) {
-                                "↩️ [${replyQuoteText?.take(35)}]\n$inputText"
+                                "↩️ [${replyQuoteText?.take(35)}]" + newlineChar + inputText
                             } else {
                                 inputText
                             }
@@ -493,7 +562,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     IconButton(
                         onClick = {
                             val finalMsg = if (!replyQuoteText.isNullOrBlank()) {
-                                "↩️ [${replyQuoteText?.take(35)}]\n$inputText"
+                                "↩️ [${replyQuoteText?.take(35)}]" + newlineChar + inputText
                             } else {
                                 inputText
                             }
@@ -518,7 +587,132 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         }
     }
 
-    // Edit Message Dialog
+    // Steganography (Ghost Hidden Message) Dialog
+    if (showStegoDialog) {
+        Dialog(onDismissRequest = { showStegoDialog = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, AmberMesh)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "🕵️ إرسال رسالة شبحية مموهة",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AmberMesh,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "ستظهر الرسالة الظاهرية فقط على الشاشة، ولن تظهر الرسالة السرية المخفية إلا عند الضغط على زر الكشف:",
+                        fontSize = 11.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = stegoCoverInput,
+                        onValueChange = { stegoCoverInput = it },
+                        label = { Text("الرسالة الظاهرية العادية (التمويه)", color = CyanPrimary, fontSize = 11.sp) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = stegoSecretInput,
+                        onValueChange = { stegoSecretInput = it },
+                        label = { Text("الرسالة السرية المخفية بداخلها 🔒", color = AmberMesh, fontSize = 11.sp) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(onClick = { showStegoDialog = false }) {
+                            Text("إلغاء", color = Color.LightGray)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (stegoSecretInput.isNotBlank()) {
+                                    viewModel.sendStegoMessageInActiveChat(stegoCoverInput, stegoSecretInput)
+                                    showStegoDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AmberMesh)
+                        ) {
+                            Text("إرسال مموه 🕵️", color = Color(0xFF001F29), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Cryptographic Digital Voucher Dialog
+    if (showVoucherDialog) {
+        Dialog(onDismissRequest = { showVoucherDialog = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldSecure)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = "💸 إصدار سند رقمي مشفر وموثق",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = EmeraldSecure,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "يتم توقيع هذا السند تلقائياً ببصمة مفتاحك التشفيري (X25519) ليكون غير قابل للتزوير بدون إنترنت:",
+                        fontSize = 11.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = voucherAmountInput,
+                        onValueChange = { voucherAmountInput = it },
+                        label = { Text("المبلغ أو القيمة (مثال: 50,000 ريال)", color = EmeraldSecure, fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = voucherPurposeInput,
+                        onValueChange = { voucherPurposeInput = it },
+                        label = { Text("البيان أو سبب السند", color = CyanPrimary, fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(onClick = { showVoucherDialog = false }) {
+                            Text("إلغاء", color = Color.LightGray)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                if (voucherAmountInput.isNotBlank()) {
+                                    viewModel.sendDigitalVoucherInActiveChat(voucherAmountInput, voucherPurposeInput)
+                                    showVoucherDialog = false
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldSecure)
+                        ) {
+                            Text("توقيع وإرسال 💸", color = Color(0xFF00220F), fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     val activeEditId = editingMessageId
     if (activeEditId != null) {
         Dialog(onDismissRequest = { editingMessageId = null }) {
@@ -582,7 +776,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         }
     }
 
-    // Full-Screen Image Viewer Dialog
     val previewPath = fullScreenImagePath
     if (previewPath != null) {
         Dialog(onDismissRequest = { fullScreenImagePath = null }) {
@@ -634,7 +827,10 @@ private fun MessageBubble(
     isPlaying: Boolean,
     isSelected: Boolean,
     translatedText: String?,
+    secretStegoText: String?,
+    isStegoRevealed: Boolean,
     onBubbleClick: () -> Unit,
+    onToggleStegoReveal: () -> Unit,
     onPlayVoiceNote: () -> Unit,
     onImageClick: (String) -> Unit,
     onTranslateClick: () -> Unit,
@@ -697,7 +893,37 @@ private fun MessageBubble(
                     else -> Text(message.text, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE6F1FF))
                 }
 
-                // Offline Arabic Translation Box
+                // Steganography Hidden Layer Indicator & Reveal Box
+                if (!secretStegoText.isNullOrBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF1A1405))
+                            .border(1.dp, AmberMesh.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                            .clickable { onToggleStegoReveal() }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = if (isStegoRevealed) "🕵️ الرسالة السرية المخفية (اضغط للإخفاء):" else "🕵️ تحتوي على طبقة سرية مموهة (اضغط للكشف)",
+                                fontSize = 10.sp,
+                                color = AmberMesh,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (isStegoRevealed) {
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    text = secretStegoText,
+                                    fontSize = 13.sp,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if (!translatedText.isNullOrBlank()) {
                     Spacer(Modifier.height(6.dp))
                     Box(
@@ -725,7 +951,6 @@ private fun MessageBubble(
                     }
                 }
 
-                // Quick Translate Prompt for English Messages
                 if (hasEnglishChars && translatedText.isNullOrBlank() && !isSelected) {
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -737,7 +962,6 @@ private fun MessageBubble(
                     )
                 }
 
-                // Interactive Message Action Bar when tapped
                 if (isSelected) {
                     Spacer(Modifier.height(8.dp))
                     Row(

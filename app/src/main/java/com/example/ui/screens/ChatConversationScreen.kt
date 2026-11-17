@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.net.Uri
+import android.speech.tts.TextToSpeech
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -59,6 +60,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -102,10 +104,61 @@ import java.util.Locale
 private val nullStrVal: String? = null
 private val newlineChar = Char(10)
 
+private fun encodeTacticalMorse(input: String): String {
+    val map = mapOf(
+        'a' to ".-", 'b' to "-...", 'c' to "-.-.", 'd' to "-..", 'e' to ".",
+        'f' to "..-.", 'g' to "--.", 'h' to "....", 'i' to "..", 'j' to ".---",
+        'k' to "-.-", 'l' to ".-..", 'm' to "--", 'n' to "-.", 'o' to "---",
+        'p' to ".--.", 'q' to "--.-", 'r' to ".-.", 's' to "...", 't' to "-",
+        'u' to "..-", 'v' to "...-", 'w' to ".--", 'x' to "-..-", 'y' to "-.--",
+        'z' to "--..", '1' to ".----", '2' to "..---", '3' to "...--", '4' to "....-",
+        '5' to ".....", '6' to "-....", '7' to "--...", '8' to "---..", '9' to "----.",
+        '0' to "-----",
+        'ا' to ".-", 'أ' to ".-", 'إ' to ".-", 'ب' to "-...", 'ت' to "-", 'ث' to "-.-.",
+        'ج' to ".---", 'ح' to "....", 'خ' to "---", 'د' to "-..", 'ذ' to "--..",
+        'ر' to ".-.", 'ز' to "---.", 'س' to "...", 'ش' to "----", 'ص' to "-..-",
+        'ض' to "...-", 'ط' to "..-", 'ظ' to "-.--", 'ع' to ".-.-", 'غ' to "--.",
+        'ف' to "..-.", 'ق' to "--.-", 'ك' to "-.-", 'ل' to ".-..", 'م' to "--",
+        'ن' to "-.", 'ه' to "..-..", 'ة' to "..-..", 'و' to ".--", 'ي' to "..", 'ى' to ".."
+    )
+    val sb = StringBuilder("⚡ [شفرة مورس التكتيكية]: ")
+    for (ch in input.lowercase(Locale.ROOT)) {
+        if (ch == ' ') {
+            sb.append(" / ")
+        } else {
+            val code = map[ch]
+            if (code != null) {
+                sb.append(code).append(" ")
+            }
+        }
+    }
+    return sb.toString().trim()
+}
+
 @Composable
 fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+
+    var ttsEngine by remember { mutableStateOf<TextToSpeech?>(null) }
+
+    DisposableEffect(context) {
+        var instance: TextToSpeech? = null
+        instance = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                try {
+                    instance?.language = Locale("ar")
+                } catch (e: Exception) {}
+            }
+        }
+        ttsEngine = instance
+        onDispose {
+            try {
+                instance?.stop()
+                instance?.shutdown()
+            } catch (e: Exception) {}
+        }
+    }
 
     val selectedPeerId by viewModel.selectedPeerId.collectAsState()
     val connectedPeers by viewModel.connectedPeers.collectAsState()
@@ -191,7 +244,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     }
 
     Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
-        // Top Header Bar with Live Distance Rangefinder
         Row(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -328,7 +380,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Messages List
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp, vertical = 8.dp),
@@ -355,6 +406,15 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     },
                     onPlayVoiceNote = { viewModel.playVoiceNote(message.id, message.mediaUri ?: "") },
                     onImageClick = { path -> fullScreenImagePath = path },
+                    onSpeakClick = {
+                        try {
+                            val textToRead = translatedText ?: message.text
+                            val hasArabic = textToRead.any { it in '\u0600'..'\u06FF' }
+                            ttsEngine?.language = if (hasArabic) Locale("ar") else Locale.US
+                            ttsEngine?.speak(textToRead, TextToSpeech.QUEUE_FLUSH, null, message.id)
+                        } catch (e: Exception) {}
+                        selectedMessageId = null
+                    },
                     onTranslateClick = {
                         viewModel.translateMessageToArabic(message.id, message.text)
                     },
@@ -394,7 +454,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 1. Steganography Ghost Message Button
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(14.dp))
@@ -414,7 +473,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 )
             }
 
-            // 2. Cryptographic Offline Digital Voucher Button
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(14.dp))
@@ -435,7 +493,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 )
             }
 
-            // 3. Live Radar & Battery Telemetry Button
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(14.dp))
@@ -448,6 +505,27 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     text = "📡 نبض الحي والبطارية",
                     fontSize = 11.sp,
                     color = CyanPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(RedAlert.copy(alpha = 0.18f))
+                    .border(1.dp, RedAlert, RoundedCornerShape(14.dp))
+                    .clickable {
+                        val base = inputText.ifBlank { "SOS" }
+                        val morse = encodeTacticalMorse(base)
+                        viewModel.sendTextMessage("$morse ($base)")
+                        inputText = ""
+                    }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Text(
+                    text = "⚡ شفرة مورس",
+                    fontSize = 11.sp,
+                    color = RedAlert,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -587,7 +665,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         }
     }
 
-    // Steganography (Ghost Hidden Message) Dialog
     if (showStegoDialog) {
         Dialog(onDismissRequest = { showStegoDialog = false }) {
             Card(
@@ -649,7 +726,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         }
     }
 
-    // Cryptographic Digital Voucher Dialog
     if (showVoucherDialog) {
         Dialog(onDismissRequest = { showVoucherDialog = false }) {
             Card(
@@ -833,6 +909,7 @@ private fun MessageBubble(
     onToggleStegoReveal: () -> Unit,
     onPlayVoiceNote: () -> Unit,
     onImageClick: (String) -> Unit,
+    onSpeakClick: () -> Unit,
     onTranslateClick: () -> Unit,
     onEditClick: () -> Unit,
     onReplyClick: () -> Unit,
@@ -893,7 +970,6 @@ private fun MessageBubble(
                     else -> Text(message.text, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE6F1FF))
                 }
 
-                // Steganography Hidden Layer Indicator & Reveal Box
                 if (!secretStegoText.isNullOrBlank()) {
                     Spacer(Modifier.height(6.dp))
                     Box(
@@ -969,10 +1045,16 @@ private fun MessageBubble(
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF070D18))
                             .border(1.dp, Color(0xFF1F355A), RoundedCornerShape(10.dp))
+                            .horizontalScroll(rememberScrollState())
                             .padding(horizontal = 6.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        ActionChipButton(
+                            label = "نطق 🔊",
+                            color = CyanPrimary,
+                            onClick = onSpeakClick
+                        )
                         ActionChipButton(
                             label = "ترجمة 🌐",
                             color = EmeraldSecure,

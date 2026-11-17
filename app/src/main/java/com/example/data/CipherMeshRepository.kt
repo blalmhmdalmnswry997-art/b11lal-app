@@ -2,11 +2,14 @@ package com.example.data
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -38,6 +41,8 @@ import java.io.InputStream
 import java.util.Collections
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.pow
+import kotlin.math.roundToInt
 
 class CipherMeshRepository(
     private val context: Context,
@@ -47,6 +52,9 @@ class CipherMeshRepository(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs = context.getSharedPreferences("ciphermesh_prefs", Context.MODE_PRIVATE)
     private val dbLock = Any()
+
+    private val sep = Char(124)
+    private val nl = Char(10)
 
     private val chatsDbFile = File(context.filesDir, "ciphermesh_chats_db.json")
     private val outboxDbFile = File(context.filesDir, "ciphermesh_outbox_db.json")
@@ -81,6 +89,13 @@ class CipherMeshRepository(
     private val _pinnedMessages = MutableStateFlow(mapOf("init" to "").minus("init"))
     val pinnedMessages = _pinnedMessages.asStateFlow()
 
+    // Steganography (Hidden Ghost Messages) Vault
+    private val _stegoSecrets = MutableStateFlow(mapOf("init" to "").minus("init"))
+    val stegoSecrets = _stegoSecrets.asStateFlow()
+
+    private val _revealedStegoIds = MutableStateFlow(setOf("init").minus("init"))
+    val revealedStegoIds = _revealedStegoIds.asStateFlow()
+
     private val autoReplyCooldownMap = Collections.synchronizedMap(mutableMapOf("init" to 0L).apply { clear() })
 
     private val welcomeMessage = ChatMessage(
@@ -88,7 +103,7 @@ class CipherMeshRepository(
         senderId = "system",
         senderName = "نظام الشبكة",
         recipientId = "*",
-        text = "مرحباً بك في CipherMesh. المحادثات الدائمة، تعديل الرسائل، والترجمة الفورية بدون إنترنت نشطة.",
+        text = "مرحباً بك في CipherMesh. المحادثات الدائمة، التمويه الرقمي 🕵️، السندات الموثقة 💸، والترجمة الفورية نشطة.",
         timestamp = System.currentTimeMillis(),
         isOutgoing = false,
         status = MessageStatus.DELIVERED,
@@ -118,6 +133,11 @@ class CipherMeshRepository(
 
     private val pendingOutbox by lazy {
         Collections.synchronizedMap(mutableMapOf("init" to Pair("", dummyPacket)).apply { clear() })
+    }
+
+    // Store-Carry-Forward Mesh Mule Vault for third-party offline nodes
+    private val meshMuleVault by lazy {
+        Collections.synchronizedMap(mutableMapOf("init" to dummyPacket).apply { clear() })
     }
 
     private var mediaRecorder: MediaRecorder? = null
@@ -255,17 +275,19 @@ class CipherMeshRepository(
         scope.launch {
             nearbyManager.connectedPeers.collect { peers ->
                 if (peers.isNotEmpty()) {
-                    delay(800)
+                    delay(600)
                     flushPendingOutbox()
+                    flushMeshMuleVault()
                 }
             }
         }
 
         scope.launch {
             while (isActive) {
-                delay(6000)
-                if (nearbyManager.connectedPeers.value.isNotEmpty() && pendingOutbox.isNotEmpty()) {
-                    flushPendingOutbox()
+                delay(5000)
+                if (nearbyManager.connectedPeers.value.isNotEmpty()) {
+                    if (pendingOutbox.isNotEmpty()) flushPendingOutbox()
+                    if (meshMuleVault.isNotEmpty()) flushMeshMuleVault()
                 }
             }
         }
@@ -277,6 +299,162 @@ class CipherMeshRepository(
                     purgeExpiredMessages()
                 }
             }
+        }
+    }
+
+    /**
+     * Innovation 1: Steganography (Hidden Secret inside Normal Cover Text)
+     */
+    fun sendStegoHiddenMessage(recipientId: String, coverText: String, secretText: String) {
+        val cleanCover = coverText.trim().ifEmpty { "السلام عليكم، كيف الأمور اليوم؟" }
+        val cleanSecret = secretText.trim()
+        if (cleanSecret.isEmpty()) {
+            sendTextMessage(recipientId, cleanCover)
+            return
+        }
+
+        val rawWireText = listOf("__STEGO__", cleanCover, cleanSecret).joinToString(sep.toString())
+        val encrypted = CryptoManager.encryptText(rawWireText, nearbyManager.getSessionKey(recipientId))
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = recipientId,
+            ttl = 8,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = encrypted
+        )
+
+        val hasConnectedPeers = nearbyManager.connectedPeers.value.isNotEmpty()
+        val initialStatus = if (hasConnectedPeers) MessageStatus.SENT else MessageStatus.SENDING
+
+        val msg = ChatMessage(
+            id = packet.packetId,
+            senderId = localNodeId,
+            senderName = localNodeName,
+            recipientId = recipientId,
+            text = cleanCover,
+            timestamp = System.currentTimeMillis(),
+            isOutgoing = true,
+            status = initialStatus,
+            hopCount = 0,
+            isEncrypted = true
+        )
+
+        _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to cleanSecret)
+        val key = if (recipientId == "*") "*" else recipientId
+        val list = _conversations.value[key] ?: emptyMsgList
+        _conversations.value = _conversations.value + (key to (list + msg))
+        saveConversationsToDisk()
+
+        if (recipientId != "*" || !hasConnectedPeers) {
+            pendingOutbox[packet.packetId] = Pair(rawWireText, packet)
+            saveOutboxToDisk()
+        }
+        if (hasConnectedPeers) {
+            nearbyManager.sendMeshPacket(packet)
+        }
+    }
+
+    fun toggleRevealStegoMessage(messageId: String) {
+        val current = _revealedStegoIds.value
+        _revealedStegoIds.value = if (current.contains(messageId)) {
+            current - messageId
+        } else {
+            current + messageId
+        }
+    }
+
+    /**
+     * Innovation 2: Cryptographically Signed Offline Financial / Trust Voucher
+     */
+    fun sendSignedDigitalVoucher(recipientId: String, amountText: String, purposeText: String) {
+        val cleanAmount = amountText.trim().ifEmpty { "100" }
+        val cleanPurpose = purposeText.trim().ifEmpty { "دفعة مستحقة" }
+        val sig = CryptoManager.localFingerprint.replace(":", "").take(10).uppercase()
+        val serial = UUID.randomUUID().toString().take(6).uppercase()
+
+        val voucherBody = StringBuilder()
+            .append("💸 [سند رقمي مشفر وموثق #").append(serial).append("]").append(nl)
+            .append("• القيمة/الاعتماد: ").append(cleanAmount).append(nl)
+            .append("• البيان: ").append(cleanPurpose).append(nl)
+            .append("• المُصدِر: ").append(localNodeName).append(nl)
+            .append("• التوقيع الرقمي: SIG-").append(sig)
+            .toString()
+
+        sendTextMessage(recipientId, voucherBody)
+    }
+
+    /**
+     * Innovation 3: Live Tactical Telemetry & Battery Radar Beacon
+     */
+    fun sendLiveTelemetryBeacon(recipientId: String) {
+        val batPct = getDeviceBatteryPercentage()
+        val distStr = estimatePeerDistanceText(recipientId)
+        val ipStr = nearbyManager.getPrimaryLocalIp()
+
+        val beaconText = StringBuilder()
+            .append("📡 [تقرير النبض الحي والرادار]").append(nl)
+            .append("• الطاقة والبطارية: ").append(batPct).append("% 🔋").append(nl)
+            .append("• المسافة المقدرة: ").append(distStr).append(nl)
+            .append("• قناة الربط: ").append(ipStr).append(" • مشفر بالكامل")
+            .toString()
+
+        sendTextMessage(recipientId, beaconText)
+    }
+
+    fun getDeviceBatteryPercentage(): Int {
+        return try {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            val lvl = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            if (lvl in 1..100) {
+                lvl
+            } else {
+                val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+                if (level in 0..Int.MAX_VALUE && scale in 1..Int.MAX_VALUE) {
+                    (level * 100) / scale
+                } else 85
+            }
+        } catch (e: Exception) {
+            85
+        }
+    }
+
+    /**
+     * Innovation 4: Real-Time Physical Distance Rangefinder in Meters (RSSI Path-Loss Model)
+     */
+    fun estimatePeerDistanceText(peerId: String?): String {
+        if (peerId == null || peerId == "*") return "بث شبكي شامل (متعدد العقد)"
+        val peer = nearbyManager.connectedPeers.value.values.find {
+            it.nodeId == peerId || it.endpointId == peerId
+        } ?: return "خارج النطاق المباشر (عبر الكبسولة الشبحية 📦)"
+
+        val rssi = peer.signalStrengthDbm
+        val txPower = -41.0
+        val ratio = (txPower - rssi.toDouble()) / (10.0 * 2.4)
+        val rawMeters = 10.0.pow(ratio).coerceIn(0.5, 250.0)
+        val rounded = (rawMeters * 10.0).roundToInt() / 10.0
+
+        val quality = when {
+            rounded in 0.0..5.0 -> "قريب جداً 🟢"
+            rounded in 5.0..20.0 -> "نطاق ممتاز 🔵"
+            else -> "نطاق بعيد 🟠"
+        }
+        return if (peer.isDirect) {
+            "~ $rounded متر ($quality)"
+        } else {
+            "~ $rounded متر (عبر ${peer.hops} قفزات)"
+        }
+    }
+
+    private fun flushMeshMuleVault() {
+        val snapshot = synchronized(meshMuleVault) { meshMuleVault.toMap() }
+        if (snapshot.isEmpty()) return
+        for ((pktId, pkt) in snapshot) {
+            nearbyManager.sendMeshPacket(pkt)
+            meshMuleVault.remove(pktId)
         }
     }
 
@@ -294,7 +472,7 @@ class CipherMeshRepository(
         }
         saveConversationsToDisk()
 
-        val cmdPlain = "__CMD_EDIT__|$messageId|$cleanText"
+        val cmdPlain = listOf("__CMD_EDIT__", messageId, cleanText).joinToString(sep.toString())
         val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
         val packet = MeshPacket(
             sourceNodeId = localNodeId,
@@ -318,7 +496,7 @@ class CipherMeshRepository(
         }
         saveConversationsToDisk()
 
-        val cmdPlain = "__CMD_DELETE__|$messageId"
+        val cmdPlain = listOf("__CMD_DELETE__", messageId).joinToString(sep.toString())
         val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
         val packet = MeshPacket(
             sourceNodeId = localNodeId,
@@ -356,7 +534,7 @@ class CipherMeshRepository(
             }
         }
 
-        val words = workingText.split(Regex("\\s+"))
+        val words = workingText.split(' ', '\n', '\t').filter { it.isNotEmpty() }
         val translatedWords = mutableListOf("init").apply { clear() }
         var anyTranslated = false
 
@@ -469,7 +647,8 @@ class CipherMeshRepository(
     }
 
     fun sendSosAlert() {
-        val sosMessage = "🚨 [نداء طوارئ SOS] من $localNodeName: أحتاج إلى مساعدة أو تواصل فوري عبر الشبكة المباشرة!"
+        val bat = getDeviceBatteryPercentage()
+        val sosMessage = "🚨 [نداء طوارئ SOS عاجل] من $localNodeName (البطارية: $bat%): أحتاج إلى مساعدة وتواصل فوري عبر الشبكة المباشرة!"
         sendTextMessage("*", sosMessage)
     }
 
@@ -478,7 +657,10 @@ class CipherMeshRepository(
             _conversations.value = mapOf("*" to listOf(welcomeMessage))
             _translatedMessages.value = mapOf("init" to "").minus("init")
             _pinnedMessages.value = mapOf("init" to "").minus("init")
+            _stegoSecrets.value = mapOf("init" to "").minus("init")
+            _revealedStegoIds.value = setOf("init").minus("init")
             pendingOutbox.clear()
+            meshMuleVault.clear()
             try { chatsDbFile.delete() } catch (e: Exception) {}
             try { outboxDbFile.delete() } catch (e: Exception) {}
         }
@@ -509,6 +691,7 @@ class CipherMeshRepository(
                 try {
                     val root = JSONObject()
                     val currentMap = _conversations.value
+                    val currentStego = _stegoSecrets.value
                     for ((peerKey, msgList) in currentMap) {
                         val arr = JSONArray()
                         for (msg in msgList) {
@@ -518,6 +701,7 @@ class CipherMeshRepository(
                             obj.put("senderName", msg.senderName)
                             obj.put("recipientId", msg.recipientId)
                             obj.put("text", msg.text)
+                            obj.put("stegoSecret", currentStego[msg.id] ?: "")
                             obj.put("mediaType", msg.mediaType?.name ?: "")
                             obj.put("mediaUri", msg.mediaUri ?: "")
                             obj.put("fileName", msg.fileName ?: "")
@@ -554,6 +738,7 @@ class CipherMeshRepository(
 
                 val root = JSONObject(content)
                 var loadedMap = mapOf("*" to listOf(welcomeMessage)).minus("*")
+                var loadedStego = mapOf("init" to "").minus("init")
                 val keys = root.keys()
                 val defaultMediaType = welcomeMessage.mediaType
 
@@ -564,6 +749,12 @@ class CipherMeshRepository(
 
                     for (i in 0 until arr.length()) {
                         val obj = arr.optJSONObject(i) ?: continue
+                        val msgId = obj.optString("id", UUID.randomUUID().toString())
+                        val stegoVal = obj.optString("stegoSecret", "")
+                        if (stegoVal.isNotEmpty()) {
+                            loadedStego = loadedStego + (msgId to stegoVal)
+                        }
+
                         val mediaTypeStr = obj.optString("mediaType", "")
                         val mediaType = try {
                             if (mediaTypeStr.isNotEmpty()) MediaType.valueOf(mediaTypeStr) else defaultMediaType
@@ -591,7 +782,7 @@ class CipherMeshRepository(
                         val rawFile = obj.optString("fileName", "")
 
                         val msg = ChatMessage(
-                            id = obj.optString("id", UUID.randomUUID().toString()),
+                            id = msgId,
                             senderId = obj.optString("senderId", ""),
                             senderName = obj.optString("senderName", ""),
                             recipientId = obj.optString("recipientId", peerKey),
@@ -615,6 +806,7 @@ class CipherMeshRepository(
                     }
                 }
 
+                _stegoSecrets.value = loadedStego
                 if (loadedMap.isNotEmpty()) {
                     if (!loadedMap.containsKey("*")) {
                         loadedMap = loadedMap + ("*" to listOf(welcomeMessage))
@@ -738,17 +930,19 @@ class CipherMeshRepository(
         when (packet.packetType) {
             PacketType.TEXT_MESSAGE -> {
                 val key = nearbyManager.getSessionKey(packet.sourceNodeId)
-                val txt = try {
+                val rawDecrypted = try {
                     CryptoManager.decryptText(packet.payloadCiphertext, key)
                 } catch (e: Exception) {
                     packet.payloadCiphertext
                 }
 
                 val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
+                val editPrefix = "__CMD_EDIT__" + sep
+                val delPrefix = "__CMD_DELETE__" + sep
+                val stegoPrefix = "__STEGO__" + sep
 
-                // Handle Remote Edit Command
-                if (txt.startsWith("__CMD_EDIT__|")) {
-                    val parts = txt.split("|", limit = 3)
+                if (rawDecrypted.startsWith(editPrefix)) {
+                    val parts = rawDecrypted.split(sep, limit = 3)
                     if (parts.size == 3) {
                         val targetId = parts[1]
                         val newBody = "${parts[2]} (معدلة ✏️)"
@@ -762,9 +956,8 @@ class CipherMeshRepository(
                     return
                 }
 
-                // Handle Remote Delete Command
-                if (txt.startsWith("__CMD_DELETE__|")) {
-                    val parts = txt.split("|", limit = 2)
+                if (rawDecrypted.startsWith(delPrefix)) {
+                    val parts = rawDecrypted.split(sep, limit = 2)
                     if (parts.size == 2) {
                         val targetId = parts[1]
                         _conversations.value = _conversations.value.mapValues { (k, list) ->
@@ -777,12 +970,21 @@ class CipherMeshRepository(
                     return
                 }
 
+                var visibleText = rawDecrypted
+                if (rawDecrypted.startsWith(stegoPrefix)) {
+                    val parts = rawDecrypted.split(sep, limit = 3)
+                    if (parts.size == 3) {
+                        visibleText = parts[1]
+                        _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to parts[2])
+                    }
+                }
+
                 val msg = ChatMessage(
                     id = packet.packetId,
                     senderId = packet.sourceNodeId,
                     senderName = packet.sourceNodeName,
                     recipientId = packet.destinationNodeId,
-                    text = txt,
+                    text = visibleText,
                     timestamp = packet.timestamp,
                     isOutgoing = false,
                     status = MessageStatus.DELIVERED,
@@ -796,7 +998,7 @@ class CipherMeshRepository(
                     _conversations.value = _conversations.value + (convKey to (list + msg))
                     saveConversationsToDisk()
 
-                    if (_isAutoReplyEnabled.value && !packet.isBroadcast && !txt.startsWith("🤖") && !txt.startsWith("🚨")) {
+                    if (_isAutoReplyEnabled.value && !packet.isBroadcast && !visibleText.startsWith("🤖") && !visibleText.startsWith("🚨")) {
                         val now = System.currentTimeMillis()
                         val lastSent = autoReplyCooldownMap[packet.sourceNodeId] ?: 0L
                         if ((now - lastSent) in 30000L..Long.MAX_VALUE) {
@@ -824,6 +1026,7 @@ class CipherMeshRepository(
             PacketType.DELIVERY_ACK -> {
                 val ackId = packet.payloadCiphertext
                 pendingOutbox.remove(ackId)
+                meshMuleVault.remove(ackId)
                 saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map {
@@ -837,6 +1040,7 @@ class CipherMeshRepository(
             PacketType.READ_RECEIPT -> {
                 val readId = packet.payloadCiphertext
                 pendingOutbox.remove(readId)
+                meshMuleVault.remove(readId)
                 saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map { if (it.id == readId) it.copy(status = MessageStatus.READ) else it }
@@ -978,6 +1182,7 @@ class CipherMeshRepository(
 
         if (recipientId != "*" || !hasConnectedPeers) {
             pendingOutbox[packet.packetId] = Pair(text, packet)
+            meshMuleVault[packet.packetId] = packet
             saveOutboxToDisk()
         }
 

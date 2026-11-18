@@ -7,8 +7,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
-import android.media.Ringtone
-import android.media.RingtoneManager
 import android.media.ToneGenerator
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -55,8 +53,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val nullChatMessage: ChatMessage? = null
     private val emptyMsgList = listOfNotNull(nullChatMessage)
 
-    private var activeRingtone: Ringtone? = null
-    private var ringbackJob: Job? = null
+    private var ringToneJob: Job? = null
+    private var activeToneGen: ToneGenerator? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var knownMessageIds = setOf("sys-welcome")
     private var isMessageTrackerInitialized = false
@@ -79,6 +77,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val connectedPeers = nearbyManager.connectedPeers
     val packetsForwarded = nearbyManager.packetsForwardedCount
     val packetsReceived = nearbyManager.packetsReceivedCount
+
+    val isGlobalBridgeConnected = nearbyManager.isGlobalBridgeConnected
+    val globalFrequencyCode = nearbyManager.globalFrequencyCode
 
     val conversations = repository.conversations
     val selectedPeerId = repository.selectedPeerId
@@ -133,15 +134,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (state) {
                     CallState.INCOMING_RINGING -> {
                         _currentScreen.value = AppScreen.VIDEO_CALL
-                        startIncomingRingtone()
+                        startSafeRingingLoop(isIncoming = true)
                         showSystemNotification(
-                            title = "مكالمة مشفرة واردة",
-                            body = "${activePeerName.value} يتصل بك عبر الشبكة المباشرة"
+                            title = "مكالمة واردة",
+                            body = "${activePeerName.value} يتصل بك الآن"
                         )
                     }
                     CallState.OUTGOING_RINGING -> {
                         _currentScreen.value = AppScreen.VIDEO_CALL
-                        startOutgoingRingback()
+                        startSafeRingingLoop(isIncoming = false)
                     }
                     CallState.CONNECTED -> {
                         stopAllCallTones()
@@ -155,6 +156,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     CallState.IDLE -> {
                         stopAllCallTones()
+                        if (_currentScreen.value == AppScreen.VIDEO_CALL) {
+                            _currentScreen.value = AppScreen.CONVERSATION
+                        }
                     }
                 }
             }
@@ -176,9 +180,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (newIncomingList.isNotEmpty() && callState.value == CallState.IDLE) {
                         val latest = newIncomingList.last()
                         val isSos = latest.text.startsWith("🚨")
-                        playIncomingMessageAlert(isSos)
+                        playShortMessageBeep(isSos)
                         showSystemNotification(
-                            title = if (isSos) "🚨 نداء طوارئ عاجل من ${latest.senderName}" else "رسالة جديدة من ${latest.senderName}",
+                            title = if (isSos) "🚨 نداء طوارئ من ${latest.senderName}" else "رسالة من ${latest.senderName}",
                             body = latest.text
                         )
                     }
@@ -187,17 +191,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Controlled non-leaking ToneGenerator loop that strictly terminates on hangup/answer
+     */
+    private fun startSafeRingingLoop(isIncoming: Boolean) {
+        stopAllCallTones()
+        ringToneJob = viewModelScope.launch {
+            var toneGen: ToneGenerator? = null
+            try {
+                toneGen = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+                activeToneGen = toneGen
+                var cycles = 0
+                while (isActive && cycles in 0..12 && (callState.value == CallState.INCOMING_RINGING || callState.value == CallState.OUTGOING_RINGING)) {
+                    val toneType = if (isIncoming) ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD else ToneGenerator.TONE_SUP_RINGTONE
+                    toneGen.startTone(toneType, 600)
+                    delay(2000)
+                    cycles += 1
+                }
+            } catch (t: Throwable) {
+            } finally {
+                try { toneGen?.stopTone() } catch (t: Throwable) {}
+                try { toneGen?.release() } catch (t: Throwable) {}
+                if (activeToneGen === toneGen) activeToneGen = null
+            }
+        }
+    }
+
+    fun stopAllCallTones() {
+        ringToneJob?.cancel()
+        ringToneJob = null
+        val gen = activeToneGen
+        activeToneGen = null
+        try { gen?.stopTone() } catch (t: Throwable) {}
+        try { gen?.release() } catch (t: Throwable) {}
+    }
+
+    private fun playShortMessageBeep(isSos: Boolean = false) {
+        viewModelScope.launch {
+            var gen: ToneGenerator? = null
+            try {
+                gen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 75)
+                gen.startTone(if (isSos) ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK else ToneGenerator.TONE_PROP_BEEP, 220)
+                delay(280)
+            } catch (t: Throwable) {
+            } finally {
+                try { gen?.stopTone() } catch (t: Throwable) {}
+                try { gen?.release() } catch (t: Throwable) {}
+            }
+        }
+    }
+
+    fun updateGlobalFrequency(newFreq: String) {
+        nearbyManager.setGlobalFrequency(newFreq)
+    }
+
     private fun createNotificationChannel() {
         try {
             if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Int.MAX_VALUE) {
                 val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                 val channel = NotificationChannel(
                     channelId,
-                    "تنبيهات ومكالمات الشبكة المباشرة",
+                    "تنبيهات ومكالمات الشبكة",
                     NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = "إشعارات الرسائل المشفرة ونداءات الطوارئ والمكالمات بدون إنترنت"
-                }
+                )
                 nm?.createNotificationChannel(channel)
             }
         } catch (t: Throwable) {}
@@ -244,60 +300,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun releaseHighPerfWifiLock() {
         try {
-            if (wifiLock?.isHeld == true) {
-                wifiLock?.release()
-            }
+            if (wifiLock?.isHeld == true) wifiLock?.release()
         } catch (t: Throwable) {}
         wifiLock = null
-    }
-
-    private fun startIncomingRingtone() {
-        stopAllCallTones()
-        try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            val ringtone = RingtoneManager.getRingtone(appContext, uri)
-            activeRingtone = ringtone
-            ringtone?.play()
-        } catch (t: Throwable) {}
-    }
-
-    private fun startOutgoingRingback() {
-        stopAllCallTones()
-        ringbackJob = viewModelScope.launch {
-            var toneGen: ToneGenerator? = null
-            try {
-                toneGen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 70)
-                while (isActive && callState.value == CallState.OUTGOING_RINGING) {
-                    toneGen.startTone(ToneGenerator.TONE_SUP_RINGTONE, 900)
-                    delay(2500)
-                }
-            } catch (t: Throwable) {
-            } finally {
-                try { toneGen?.release() } catch (t: Throwable) {}
-            }
-        }
-    }
-
-    private fun stopAllCallTones() {
-        ringbackJob?.cancel()
-        ringbackJob = null
-        try {
-            activeRingtone?.stop()
-        } catch (t: Throwable) {}
-        activeRingtone = null
-    }
-
-    private fun playIncomingMessageAlert(isSos: Boolean = false) {
-        try {
-            if (isSos) {
-                val toneGen = ToneGenerator(AudioManager.STREAM_ALARM, 100)
-                toneGen.startTone(ToneGenerator.TONE_CDMA_EMERGENCY_RINGBACK, 1200)
-            } else {
-                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                val notif = RingtoneManager.getRingtone(appContext, uri)
-                notif?.play()
-            }
-        } catch (t: Throwable) {}
     }
 
     fun sendStegoMessageInActiveChat(coverText: String, secretText: String) {
@@ -389,6 +394,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun navigateTo(screen: AppScreen) {
+        if (screen != AppScreen.VIDEO_CALL) {
+            stopAllCallTones()
+        }
         _currentScreen.value = screen
     }
 
@@ -450,10 +458,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun acceptCall() {
+        stopAllCallTones()
         webRtcManager.acceptIncomingCall()
     }
 
     fun endCall() {
+        stopAllCallTones()
         webRtcManager.rejectOrEndCall()
     }
 

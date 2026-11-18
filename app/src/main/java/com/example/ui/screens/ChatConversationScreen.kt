@@ -117,9 +117,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         var instance: TextToSpeech? = null
         instance = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                try {
-                    instance?.language = Locale("ar")
-                } catch (e: Exception) {}
+                try { instance?.language = Locale("ar") } catch (e: Exception) {}
             }
         }
         ttsEngine = instance
@@ -139,12 +137,12 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     val playingMessageId by viewModel.playingMessageId.collectAsState()
     val verifiedPeers by viewModel.verifiedPeers.collectAsState()
     val peerToVerify by viewModel.peerToVerify.collectAsState()
+    val isGlobalBridgeConnected by viewModel.nearbyManager.isGlobalBridgeConnected.collectAsState()
 
     val translatedMessages by viewModel.translatedMessages.collectAsState()
     val pinnedMessages by viewModel.pinnedMessages.collectAsState()
     val stegoSecrets by viewModel.stegoSecrets.collectAsState()
     val revealedStegoIds by viewModel.revealedStegoIds.collectAsState()
-    val isSelfDestructEnabled by viewModel.isSelfDestructEnabled.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
     var selectedMessageId by remember { mutableStateOf(nullStrVal) }
@@ -157,7 +155,10 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     var stegoCoverInput by remember { mutableStateOf("السلام عليكم، كيف حالك اليوم؟") }
     var stegoSecretInput by remember { mutableStateOf("") }
 
-    var showFilterStarredOnly by remember { mutableStateOf(false) }
+    // Call Mode Choice Dialog (Internet High-Speed vs Local Offline)
+    var showCallModeDialog by remember { mutableStateOf(false) }
+    var requestedCallType by remember { mutableStateOf(CallType.VIDEO) }
+
     var starredMessageIds by remember { mutableStateOf(setOf("init").minus("init")) }
     var messageReactions by remember { mutableStateOf(mapOf("init" to "").minus("init")) }
 
@@ -171,7 +172,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     val currentPinnedText = pinnedMessages[currentPeerKey]
 
     val currentPeer = connectedPeers.values.find { it.nodeId == selectedPeerId || it.endpointId == selectedPeerId }
-    val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "البث العام للشبكة" else "متصل-${selectedPeerId?.take(4)}"
+    val peerDisplayName = currentPeer?.nodeName ?: if (selectedPeerId == "*") "البث العام للشبكة" else "مستخدم-${selectedPeerId?.takeLast(4)?.uppercase()}"
     val isBroadcast = selectedPeerId == "*" || selectedPeerId == null
     val isVerified = selectedPeerId != null && verifiedPeers.contains(selectedPeerId)
 
@@ -179,16 +180,11 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         viewModel.getActivePeerDistanceText()
     }
 
-    val displayedMessages = remember(messages, searchQuery, isSearchActive, showFilterStarredOnly, starredMessageIds) {
-        val base = if (showFilterStarredOnly) {
-            messages.filter { starredMessageIds.contains(it.id) }
-        } else {
-            messages
-        }
+    val displayedMessages = remember(messages, searchQuery, isSearchActive) {
         if (!isSearchActive || searchQuery.isBlank()) {
-            base
+            messages
         } else {
-            base.filter { it.text.contains(searchQuery.trim(), ignoreCase = true) }
+            messages.filter { it.text.contains(searchQuery.trim(), ignoreCase = true) }
         }
     }
 
@@ -196,10 +192,9 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
         listOf(
             "👋 السلام عليكم",
             "👍 تم الاستلام",
-            "📞 اتصل بي فيديو HD",
+            "📞 اتصل بي الآن",
             "📍 أين موقعك؟",
-            "✅ أنا في الطريق",
-            "⏳ انتظر لحظة"
+            "✅ أنا في الطريق"
         )
     }
 
@@ -221,19 +216,31 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
     }
 
     Column(modifier = modifier.fillMaxSize().background(Color(0xFF070D18))) {
-        // Top Chat Header Bar
+        // Fixed Single-Line Header Bar (Never wraps vertically!)
         Row(
-            modifier = Modifier.fillMaxWidth().background(Color(0xFF0F1A2E)).padding(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(62.dp)
+                .background(Color(0xFF0F1A2E))
+                .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                IconButton(onClick = { viewModel.navigateTo(AppScreen.CHATS) }, modifier = Modifier.testTag("back_button")) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                IconButton(
+                    onClick = { viewModel.navigateTo(AppScreen.CHATS) },
+                    modifier = Modifier.size(36.dp).testTag("back_button")
+                ) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = Color.White)
                 }
                 Spacer(Modifier.width(4.dp))
                 Box(
-                    modifier = Modifier.size(38.dp).clip(CircleShape)
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
                         .background(if (isBroadcast) AmberMesh.copy(alpha = 0.2f) else CyanPrimary.copy(alpha = 0.2f)),
                     contentAlignment = Alignment.Center
                 ) {
@@ -241,15 +248,15 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         imageVector = if (isBroadcast) Icons.Default.Hub else Icons.Default.Lock,
                         contentDescription = null,
                         tint = if (isBroadcast) AmberMesh else CyanPrimary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-                Spacer(Modifier.width(10.dp))
-                Column {
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = peerDisplayName,
-                            style = MaterialTheme.typography.titleMedium,
+                            fontSize = 14.sp,
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -257,53 +264,62 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         )
                         if (isVerified) {
                             Spacer(Modifier.width(4.dp))
-                            Icon(Icons.Default.CheckCircle, contentDescription = "موثوق", tint = EmeraldSecure, modifier = Modifier.size(14.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = "موثوق", tint = EmeraldSecure, modifier = Modifier.size(13.dp))
                         }
                     }
                     Text(
-                        text = if (inputText.isNotEmpty()) "✍️ جاري الكتابة الآن..." else "✨ صوت وفيديو HD • $liveDistanceText",
+                        text = if (inputText.isNotEmpty()) "✍️ جاري الكتابة..." else liveDistanceText,
                         fontSize = 11.sp,
-                        color = if (inputText.isNotEmpty()) CyanPrimary else if (isSelfDestructEnabled || isBroadcast) AmberMesh else EmeraldSecure,
-                        fontWeight = FontWeight.SemiBold
+                        color = if (inputText.isNotEmpty()) CyanPrimary else EmeraldSecure,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(
-                    onClick = { showFilterStarredOnly = !showFilterStarredOnly }
+                    onClick = {
+                        isSearchActive = !isSearchActive
+                        if (!isSearchActive) searchQuery = ""
+                    },
+                    modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = "الرسائل المميزة بنجمة",
-                        tint = if (showFilterStarredOnly) AmberMesh else Color.LightGray
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "بحث",
+                        tint = if (isSearchActive) AmberMesh else Color.LightGray,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
                 IconButton(
                     onClick = {
-                        isSearchActive = !isSearchActive
-                        if (!isSearchActive) searchQuery = ""
-                    }
+                        requestedCallType = CallType.VOICE
+                        showCallModeDialog = true
+                    },
+                    modifier = Modifier.size(36.dp).testTag("voice_call_button")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "بحث في المحادثة",
-                        tint = if (isSearchActive) AmberMesh else Color.LightGray
-                    )
+                    Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية", tint = CyanPrimary, modifier = Modifier.size(20.dp))
                 }
 
-                if (!isBroadcast && selectedPeerId != null) {
-                    IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VOICE) }, modifier = Modifier.testTag("voice_call_button")) {
-                        Icon(Icons.Default.Call, contentDescription = "مكالمة صوتية HD", tint = CyanPrimary)
-                    }
-                    IconButton(onClick = { viewModel.startCall(selectedPeerId!!, peerDisplayName, CallType.VIDEO) }, modifier = Modifier.testTag("video_call_button")) {
-                        Icon(Icons.Default.Videocam, contentDescription = "مكالمة فيديو HD", tint = EmeraldSecure)
-                    }
-                    currentPeer?.let { peer ->
-                        IconButton(onClick = { viewModel.openVerificationDialog(peer) }, modifier = Modifier.testTag("verify_key_button")) {
-                            Icon(Icons.Default.Security, contentDescription = "توثيق الأمان", tint = if (isVerified) EmeraldSecure else AmberMesh)
-                        }
+                IconButton(
+                    onClick = {
+                        requestedCallType = CallType.VIDEO
+                        showCallModeDialog = true
+                    },
+                    modifier = Modifier.size(36.dp).testTag("video_call_button")
+                ) {
+                    Icon(Icons.Default.Videocam, contentDescription = "مكالمة فيديو", tint = EmeraldSecure, modifier = Modifier.size(22.dp))
+                }
+
+                currentPeer?.let { peer ->
+                    IconButton(
+                        onClick = { viewModel.openVerificationDialog(peer) },
+                        modifier = Modifier.size(34.dp).testTag("verify_key_button")
+                    ) {
+                        Icon(Icons.Default.Security, contentDescription = "توثيق", tint = if (isVerified) EmeraldSecure else AmberMesh, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -320,7 +336,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
-                    placeholder = { Text("ابحث عن أي رسالة أو كلمة...", fontSize = 12.sp, color = Color.Gray) },
+                    placeholder = { Text("ابحث عن رسالة...", fontSize = 12.sp, color = Color.Gray) },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp)
@@ -349,7 +365,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     Icon(Icons.Default.Star, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(8.dp))
                     Column {
-                        Text("رسالة مثبتة في أعلى المحادثة 📌", fontSize = 10.sp, color = AmberMesh, fontWeight = FontWeight.Bold)
+                        Text("رسالة مثبتة 📌", fontSize = 10.sp, color = AmberMesh, fontWeight = FontWeight.Bold)
                         Text(
                             text = currentPinnedText,
                             fontSize = 12.sp,
@@ -396,23 +412,10 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     },
                     onReactionSelected = { emoji ->
                         messageReactions = messageReactions + (message.id to emoji)
-                        val baseClean = message.text
-                            .replace(" [❤️]", "")
-                            .replace(" [😂]", "")
-                            .replace(" [🔥]", "")
-                            .replace(" [👍]", "")
-                            .replace(" [👏]", "")
-                            .replace("(معدلة ✏️)", "")
-                            .trim()
-                        viewModel.editMessageInActiveChat(message.id, "$baseClean [$emoji]")
                         selectedMessageId = null
                     },
                     onToggleStar = {
-                        starredMessageIds = if (isStarred) {
-                            starredMessageIds - message.id
-                        } else {
-                            starredMessageIds + message.id
-                        }
+                        starredMessageIds = if (isStarred) starredMessageIds - message.id else starredMessageIds + message.id
                         selectedMessageId = null
                     },
                     onToggleVoiceSpeed = {
@@ -472,7 +475,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
             }
         }
 
-        // Attractive Chat Tools & Quick Replies Bar
+        // Quick Tools Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -494,7 +497,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "🔒 رسالة سرية بكلمة مرور",
+                    text = "🔒 رسالة سرية",
                     fontSize = 11.sp,
                     color = AmberMesh,
                     fontWeight = FontWeight.Bold
@@ -510,7 +513,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                     .padding(horizontal = 10.dp, vertical = 5.dp)
             ) {
                 Text(
-                    text = "🔋 مشاركة حالة البطارية والشبكة",
+                    text = "🔋 مشاركة حالة البطارية",
                     fontSize = 11.sp,
                     color = EmeraldSecure,
                     fontWeight = FontWeight.Bold
@@ -593,7 +596,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("اكتب رسالة (أو اضغط على أي رسالة للتفاعل ❤️ والترجمة)...", color = Color(0xFF536B8D), fontSize = 11.sp) },
+                    placeholder = { Text("اكتب رسالة...", color = Color(0xFF536B8D), fontSize = 12.sp) },
                     modifier = Modifier.weight(1f).testTag("message_input_field"),
                     shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
@@ -618,7 +621,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                             replyQuoteSender = null
                         }
                     }),
-                    maxLines = 4
+                    maxLines = 3
                 )
 
                 Spacer(Modifier.width(6.dp))
@@ -645,7 +648,90 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         onClick = { viewModel.startVoiceRecording() },
                         modifier = Modifier.size(44.dp).clip(CircleShape).background(EmeraldSecure).testTag("voice_record_button")
                     ) {
-                        Icon(Icons.Default.Mic, contentDescription = "تسجيل صوتي نقي", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
+                        Icon(Icons.Default.Mic, contentDescription = "تسجيل صوتي", tint = Color(0xFF00220F), modifier = Modifier.size(22.dp))
+                    }
+                }
+            }
+        }
+    }
+
+    // Call Mode Choice Dialog (Internet vs Local)
+    if (showCallModeDialog) {
+        val targetId = selectedPeerId ?: connectedPeers.values.firstOrNull()?.nodeId ?: "*"
+        Dialog(onDismissRequest = { showCallModeDialog = false }) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0B1424)),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, EmeraldSecure)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Text(
+                        text = if (requestedCallType == CallType.VIDEO) "📹 اختيار وضع مكالمة الفيديو" else "📞 اختيار وضع المكالمة الصوتية",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "لضمان أعلى دقة واستقرار بدون تقطيع، اختر مسار الاتصال المناسب لك:",
+                        fontSize = 12.sp,
+                        color = Color(0xFF8FA4C4)
+                    )
+                    Spacer(Modifier.height(14.dp))
+
+                    Button(
+                        onClick = {
+                            showCallModeDialog = false
+                            viewModel.startCall(targetId, peerDisplayName, requestedCallType)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldSecure),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(vertical = 4.dp)) {
+                            Text(
+                                text = "🌐 اتصال مستقر عبر الإنترنت / Wi-Fi (موصى به)",
+                                fontSize = 12.sp,
+                                color = Color(0xFF00220F),
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = if (isGlobalBridgeConnected) "متصل بالإنترنت جاهز بدون تقطيع ✅" else "يرجى تفعيل الإنترنت لأفضل جودة فيديو",
+                                fontSize = 10.sp,
+                                color = Color(0xFF00220F)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            showCallModeDialog = false
+                            viewModel.startCall(targetId, peerDisplayName, requestedCallType)
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, CyanPrimary),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(vertical = 4.dp)) {
+                            Text(
+                                text = "📡 اتصال محلي مباشر (بلوتوث للأجهزة القريبة)",
+                                fontSize = 11.sp,
+                                color = CyanPrimary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+
+                    OutlinedButton(
+                        onClick = { showCallModeDialog = false },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("إلغاء", color = Color.LightGray, fontSize = 11.sp)
                     }
                 }
             }
@@ -733,12 +819,6 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = "سيتم تحديث نص الرسالة فوراً لديك ولدى الطرف المتصل:",
-                        fontSize = 12.sp,
-                        color = Color(0xFF8FA4C4)
-                    )
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = editingTextValue,
@@ -794,7 +874,7 @@ fun ChatConversationScreen(viewModel: MainViewModel, modifier: Modifier = Modifi
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("معاينة الصورة بوضوح كامل HD", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("معاينة الصورة", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         IconButton(onClick = { fullScreenImagePath = null }) {
                             Icon(Icons.Default.Close, contentDescription = "إغلاق", tint = Color.White)
                         }
@@ -851,23 +931,16 @@ private fun MessageBubble(
     val bubbleColor = if (message.isOutgoing) Color(0xFF003644) else Color(0xFF132038)
     val borderColor = if (isSelected) AmberMesh else if (message.isOutgoing) CyanPrimary.copy(alpha = 0.5f) else Color(0xFF1F355A)
 
-    val hasEnglishChars = remember(message.text) {
-        message.text.any { it in 'a'..'z' || it in 'A'..'Z' }
+    // Only show translate button if message is genuinely English (no Arabic letters)
+    val isPureEnglishMessage = remember(message.text) {
+        val arabicCount = message.text.count { it.code in 1536..1791 }
+        val englishCount = message.text.count { it in 'a'..'z' || it in 'A'..'Z' }
+        arabicCount == 0 && englishCount in 2..200 && message.text.contains(' ')
     }
 
     val reactionOptions = remember { listOf("❤️", "👍", "🔥", "😂", "👏") }
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
-        if (message.hopCount in 1..Int.MAX_VALUE || message.relayPath.isNotEmpty()) {
-            val hopText = if (message.relayPath.isNotEmpty()) "مرسل عبر: ${message.relayPath.joinToString(" <- ")}" else "تم توجيهه (${message.hopCount} قفزات)"
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
-                Icon(Icons.Default.Hub, contentDescription = null, tint = AmberMesh, modifier = Modifier.size(10.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(hopText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, color = AmberMesh, fontWeight = FontWeight.Medium)
-            }
-        }
-
-        // Instant Emoji Reaction Bar when bubble is tapped
         if (isSelected) {
             Row(
                 modifier = Modifier
@@ -971,7 +1044,7 @@ private fun MessageBubble(
                     ) {
                         Column {
                             Text(
-                                text = "🌐 الترجمة الفورية للعربية:",
+                                text = "🌐 الترجمة للعربية:",
                                 fontSize = 10.sp,
                                 color = EmeraldSecure,
                                 fontWeight = FontWeight.Bold
@@ -987,10 +1060,10 @@ private fun MessageBubble(
                     }
                 }
 
-                if (hasEnglishChars && translatedText.isNullOrBlank() && !isSelected) {
+                if (isPureEnglishMessage && translatedText.isNullOrBlank() && !isSelected) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "🌐 اضغط لترجمة الرسالة للعربية",
+                        text = "🌐 ترجمة للعربية",
                         fontSize = 10.sp,
                         color = CyanPrimary,
                         fontWeight = FontWeight.Bold,
@@ -1010,49 +1083,19 @@ private fun MessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ActionChipButton(
-                            label = "نطق 🔊",
-                            color = CyanPrimary,
-                            onClick = onSpeakClick
-                        )
-                        ActionChipButton(
-                            label = if (isStarred) "إلغاء النجمة ⭐" else "تمييز بنجمة ⭐",
-                            color = AmberMesh,
-                            onClick = onToggleStar
-                        )
-                        ActionChipButton(
-                            label = "ترجمة 🌐",
-                            color = EmeraldSecure,
-                            onClick = onTranslateClick
-                        )
-                        if (message.isOutgoing && message.mediaType == null) {
-                            ActionChipButton(
-                                label = "تعديل ✏️",
-                                color = CyanPrimary,
-                                onClick = onEditClick
-                            )
+                        ActionChipButton(label = "نطق 🔊", color = CyanPrimary, onClick = onSpeakClick)
+                        ActionChipButton(label = if (isStarred) "إلغاء ⭐" else "نجمة ⭐", color = AmberMesh, onClick = onToggleStar)
+                        if (isPureEnglishMessage) {
+                            ActionChipButton(label = "ترجمة 🌐", color = EmeraldSecure, onClick = onTranslateClick)
                         }
-                        ActionChipButton(
-                            label = "رد ↩️",
-                            color = Color.White,
-                            onClick = onReplyClick
-                        )
-                        ActionChipButton(
-                            label = "تثبيت 📌",
-                            color = AmberMesh,
-                            onClick = onPinClick
-                        )
-                        ActionChipButton(
-                            label = "نسخ 📋",
-                            color = Color.LightGray,
-                            onClick = onCopyClick
-                        )
+                        if (message.isOutgoing && message.mediaType == null) {
+                            ActionChipButton(label = "تعديل ✏️", color = CyanPrimary, onClick = onEditClick)
+                        }
+                        ActionChipButton(label = "رد ↩️", color = Color.White, onClick = onReplyClick)
+                        ActionChipButton(label = "تثبيت 📌", color = AmberMesh, onClick = onPinClick)
+                        ActionChipButton(label = "نسخ 📋", color = Color.LightGray, onClick = onCopyClick)
                         if (message.id != "sys-welcome") {
-                            ActionChipButton(
-                                label = "حذف 🗑️",
-                                color = RedAlert,
-                                onClick = onDeleteClick
-                            )
+                            ActionChipButton(label = "حذف 🗑️", color = RedAlert, onClick = onDeleteClick)
                         }
                     }
                 }
@@ -1089,11 +1132,7 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun ActionChipButton(
-    label: String,
-    color: Color,
-    onClick: () -> Unit
-) {
+private fun ActionChipButton(label: String, color: Color, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -1101,12 +1140,7 @@ private fun ActionChipButton(
             .clickable { onClick() }
             .padding(horizontal = 7.dp, vertical = 4.dp)
     ) {
-        Text(
-            text = label,
-            fontSize = 10.sp,
-            color = color,
-            fontWeight = FontWeight.Bold
-        )
+        Text(text = label, fontSize = 10.sp, color = color, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1125,7 +1159,7 @@ private fun VoiceNoteBubble(
         Spacer(Modifier.width(10.dp))
         Column {
             Text(text, fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
-            Text(if (isPlaying) "جاري التشغيل بنقاء HD..." else "اضغط للاستماع", fontSize = 10.sp, color = EmeraldSecure)
+            Text(if (isPlaying) "جاري التشغيل..." else "اضغط للاستماع", fontSize = 10.sp, color = EmeraldSecure)
         }
         Spacer(Modifier.width(10.dp))
         Box(
@@ -1151,7 +1185,7 @@ private fun VoiceNoteRecordingBar(durationSec: Int, onCancel: () -> Unit, onSend
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(12.dp).clip(CircleShape).background(RedAlert))
             Spacer(Modifier.width(10.dp))
-            Text("تسجيل صوتي نقي HD • 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text("تسجيل صوتي • 0:${String.format("%02d", durationSec)}", color = RedAlert, fontSize = 13.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             IconButton(onClick = onCancel, modifier = Modifier.size(38.dp).clip(CircleShape).background(Color(0xFF162540))) {

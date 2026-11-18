@@ -44,8 +44,8 @@ import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-import kotlin.math.pow
-import kotlin.math.roundToInt
+import javax.crypto.SecretKey
+import javax.crypto.spec.SecretKeySpec
 
 class CipherMeshRepository(
     private val context: Context,
@@ -62,6 +62,13 @@ class CipherMeshRepository(
     private val chatsDbFile = File(context.filesDir, "ciphermesh_chats_db.json")
     private val outboxDbFile = File(context.filesDir, "ciphermesh_outbox_db.json")
 
+    // Unified deterministic AES-256 key so all devices decrypt broadcast & offline messages cleanly
+    private val universalMeshKey: SecretKey by lazy {
+        val raw = MessageDigest.getInstance("SHA-256")
+            .digest("CipherMesh_Universal_AES256_Key_2026".toByteArray(Charsets.UTF_8))
+        SecretKeySpec(raw, "AES")
+    }
+
     private val nullString: String? = null
 
     val localNodeId: String
@@ -77,7 +84,7 @@ class CipherMeshRepository(
     private val _isAutoReplyEnabled = MutableStateFlow(false)
     val isAutoReplyEnabled = _isAutoReplyEnabled.asStateFlow()
 
-    private val _autoReplyText = MutableStateFlow("أنا بعيد عن الهاتف حالياً، وصلتني رسالتك المشفرة عبر الشبكة وسأرد عليك قريباً.")
+    private val _autoReplyText = MutableStateFlow("أنا بعيد عن الهاتف حالياً، وصلتني رسالتك وسأرد عليك قريباً.")
     val autoReplyText = _autoReplyText.asStateFlow()
 
     private val _appPinCode = MutableStateFlow("")
@@ -106,7 +113,7 @@ class CipherMeshRepository(
         senderId = "system",
         senderName = "نظام الشبكة",
         recipientId = "*",
-        text = "مرحباً بك في CipherMesh. التشفير المزدوج (AES-256-GCM)، التوجيه الذكي، ومكالمات الصوت والفيديو المتكيفة نشطة.",
+        text = "مرحباً بك في CipherMesh. الدردشة المشفرة والمكالمات الصوتية والمرئية جاهزة.",
         timestamp = System.currentTimeMillis(),
         isOutgoing = false,
         status = MessageStatus.DELIVERED,
@@ -138,10 +145,6 @@ class CipherMeshRepository(
         Collections.synchronizedMap(mutableMapOf("init" to Pair("", dummyPacket)).apply { clear() })
     }
 
-    private val meshMuleVault by lazy {
-        Collections.synchronizedMap(mutableMapOf("init" to dummyPacket).apply { clear() })
-    }
-
     private var mediaRecorder: MediaRecorder? = null
     private var currentVoiceNoteFile: File? = null
     private val _isRecordingVoiceNote = MutableStateFlow(false)
@@ -155,28 +158,48 @@ class CipherMeshRepository(
     val playingMessageId = _playingMessageId.asStateFlow()
 
     private val offlinePhraseDictionary = mapOf(
-        "how are you" to "كيف حالك؟", "where are you" to "أين أنت؟",
-        "on my way" to "في الطريق", "call me" to "اتصل بي",
-        "i need help" to "أحتاج إلى مساعدة", "help me" to "ساعدني",
-        "wait a minute" to "انتظر دقيقة", "thank you" to "شكراً لك",
-        "good morning" to "صباح الخير", "good evening" to "مساء الخير",
-        "see you soon" to "أراك قريباً", "no internet" to "لا يوجد إنترنت"
+        "how are you" to "كيف حالك؟",
+        "how are you doing" to "كيف أمورك؟",
+        "where are you" to "أين أنت؟",
+        "i am on my way" to "أنا في طريقي إليك",
+        "on my way" to "في الطريق",
+        "call me" to "اتصل بي",
+        "can you call me" to "هل يمكنك الاتصال بي؟",
+        "i need help" to "أحتاج إلى مساعدة",
+        "help me" to "ساعدني",
+        "are you there" to "هل أنت موجود؟",
+        "wait a minute" to "انتظر دقيقة",
+        "wait for me" to "انتظرني",
+        "thank you" to "شكراً لك",
+        "thanks a lot" to "شكراً جزيلاً",
+        "good morning" to "صباح الخير",
+        "good evening" to "مساء الخير",
+        "good night" to "تصبح على خير",
+        "see you soon" to "أراك قريباً",
+        "see you later" to "أراك لاحقاً",
+        "no internet" to "لا يوجد إنترنت",
+        "everything is ok" to "كل شيء على ما يرام",
+        "i am busy" to "أنا مشغول حالياً",
+        "i am ready" to "أنا جاهز"
     )
 
     private val offlineWordDictionary = mapOf(
-        "hello" to "مرحباً", "hi" to "أهلاً", "welcome" to "أهلاً وسهلاً",
-        "yes" to "نعم", "no" to "لا", "ok" to "حسناً", "okay" to "تمام",
-        "please" to "من فضلك", "thanks" to "شكراً", "sorry" to "عذراً",
-        "i" to "أنا", "you" to "أنت", "we" to "نحن", "they" to "هم",
-        "what" to "ماذا", "where" to "أين", "when" to "متى", "how" to "كيف",
-        "good" to "جيد", "bad" to "سيئ", "fine" to "بخير", "safe" to "آمن",
-        "danger" to "خطر", "emergency" to "طوارئ", "urgent" to "عاجل",
-        "now" to "الآن", "later" to "لاحقاً", "today" to "اليوم",
+        "hello" to "مرحباً", "hi" to "أهلاً", "hey" to "يا هلا", "welcome" to "أهلاً وسهلاً",
+        "yes" to "نعم", "no" to "لا", "ok" to "حسناً", "okay" to "تمام", "sure" to "بالتأكيد",
+        "please" to "من فضلك", "thanks" to "شكراً", "thank" to "شكر", "sorry" to "عذراً",
+        "i" to "أنا", "you" to "أنت", "he" to "هو", "she" to "هي", "we" to "نحن", "they" to "هم",
+        "what" to "ماذا", "where" to "أين", "when" to "متى", "why" to "لماذا", "how" to "كيف",
+        "good" to "جيد", "bad" to "سيئ", "great" to "رائع", "fine" to "بخير", "safe" to "آمن",
+        "danger" to "خطر", "emergency" to "طوارئ", "urgent" to "عاجل", "important" to "مهم",
+        "now" to "الآن", "later" to "لاحقاً", "today" to "اليوم", "tomorrow" to "غداً",
         "here" to "هنا", "there" to "هناك", "near" to "قريب", "far" to "بعيد",
+        "home" to "المنزل", "work" to "العمل", "road" to "الطريق", "location" to "الموقع",
+        "go" to "اذهب", "come" to "تعال", "wait" to "انتظر", "stop" to "توقف",
         "call" to "اتصال", "video" to "فيديو", "voice" to "صوت", "message" to "رسالة",
         "image" to "صورة", "file" to "ملف", "phone" to "هاتف", "battery" to "البطارية",
         "network" to "الشبكة", "connected" to "متصل", "offline" to "بدون إنترنت",
-        "help" to "مساعدة", "friend" to "صديق", "water" to "ماء", "food" to "طعام"
+        "need" to "أحتاج", "want" to "أريد", "know" to "أعرف", "help" to "مساعدة",
+        "friend" to "صديق", "brother" to "أخ", "team" to "الفريق", "water" to "ماء", "food" to "طعام"
     )
 
     init {
@@ -209,23 +232,35 @@ class CipherMeshRepository(
 
         nearbyManager.initialize(localNodeId, localNodeName)
 
-        scope.launch { nearbyManager.incomingPackets.collect { handleIncomingPacket(it) } }
-        scope.launch { nearbyManager.onFileReceived.collect { (h, f) -> handleCompletedFileReceived(h, f) } }
         scope.launch {
+            nearbyManager.incomingPackets.collect { packet ->
+                handleIncomingPacket(packet)
+            }
+        }
+        scope.launch {
+            nearbyManager.onFileReceived.collect { (h, f) ->
+                handleCompletedFileReceived(h, f)
+            }
+        }
+        // Whenever a peer joins or reconnects, immediately sync pending messages to them
+        scope.launch {
+            var lastPeerCount = 0
             nearbyManager.connectedPeers.collect { peers ->
                 if (peers.isNotEmpty()) {
-                    delay(500)
+                    delay(350)
                     flushPendingOutbox()
-                    flushMeshMuleVault()
+                    if (peers.size != lastPeerCount) {
+                        lastPeerCount = peers.size
+                        syncRecentMessagesToJoinedPeers()
+                    }
                 }
             }
         }
         scope.launch {
             while (isActive) {
-                delay(4500)
-                if (nearbyManager.connectedPeers.value.isNotEmpty()) {
-                    if (pendingOutbox.isNotEmpty()) flushPendingOutbox()
-                    if (meshMuleVault.isNotEmpty()) flushMeshMuleVault()
+                delay(3500)
+                if (nearbyManager.connectedPeers.value.isNotEmpty() && pendingOutbox.isNotEmpty()) {
+                    flushPendingOutbox()
                 }
             }
         }
@@ -234,6 +269,64 @@ class CipherMeshRepository(
                 delay(5000)
                 if (_isSelfDestructEnabled.value) purgeExpiredMessagesAndMedia()
             }
+        }
+    }
+
+    private fun encryptWithUniversalKey(plainText: String): String {
+        return CryptoManager.encryptText(plainText, universalMeshKey)
+    }
+
+    private fun decryptSmart(cipherText: String, senderNodeId: String): String {
+        // 1. Try universal mesh key first
+        try {
+            val dec = CryptoManager.decryptText(cipherText, universalMeshKey)
+            if (dec != cipherText && !looksLikeRawBase64Cipher(dec)) return dec
+        } catch (e: Exception) {}
+
+        // 2. Try pairwise session key
+        try {
+            val pairKey = nearbyManager.getSessionKey(senderNodeId)
+            val dec2 = CryptoManager.decryptText(cipherText, pairKey)
+            if (dec2 != cipherText && !looksLikeRawBase64Cipher(dec2)) return dec2
+        } catch (e: Exception) {}
+
+        return if (looksLikeRawBase64Cipher(cipherText)) "" else cipherText
+    }
+
+    private fun looksLikeRawBase64Cipher(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.length !in 28..600) return false
+        if (trimmed.contains(' ')) return false
+        val hasArabic = trimmed.any { it.code in 1536..1791 }
+        if (hasArabic) return false
+        val base64Chars = trimmed.count { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '+' || it == '/' || it == '=' }
+        return base64Chars == trimmed.length
+    }
+
+    private fun syncRecentMessagesToJoinedPeers() {
+        scope.launch {
+            try {
+                val allConv = _conversations.value
+                for ((peerKey, msgList) in allConv) {
+                    val recentOutgoing = msgList.filter { it.isOutgoing && it.id != "sys-welcome" }.takeLast(5)
+                    for (msg in recentOutgoing) {
+                        val enc = encryptWithUniversalKey(msg.text)
+                        val syncPkt = MeshPacket(
+                            packetId = msg.id,
+                            sourceNodeId = localNodeId,
+                            sourceNodeName = localNodeName,
+                            destinationNodeId = peerKey,
+                            ttl = 12,
+                            hopCount = 0,
+                            packetType = PacketType.TEXT_MESSAGE,
+                            payloadCiphertext = enc,
+                            timestamp = msg.timestamp
+                        )
+                        nearbyManager.sendMeshPacket(syncPkt)
+                        delay(80)
+                    }
+                }
+            } catch (e: Exception) {}
         }
     }
 
@@ -255,7 +348,6 @@ class CipherMeshRepository(
             _stegoSecrets.value = mapOf("init" to "").minus("init")
             _revealedStegoIds.value = setOf("init").minus("init")
             pendingOutbox.clear()
-            meshMuleVault.clear()
             try { chatsDbFile.delete() } catch (e: Exception) {}
             try { outboxDbFile.delete() } catch (e: Exception) {}
             try { File(context.filesDir, "received_media").deleteRecursively() } catch (e: Exception) {}
@@ -265,37 +357,29 @@ class CipherMeshRepository(
     }
 
     fun sendTextMessage(recipientId: String, text: String) {
-        val isSos = text.startsWith("🚨")
-        val encrypted = CryptoManager.encryptText(text, nearbyManager.getSessionKey(recipientId))
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val encrypted = encryptWithUniversalKey(clean)
         val packet = MeshPacket(
             sourceNodeId = localNodeId,
             sourceNodeName = localNodeName,
             destinationNodeId = recipientId,
-            ttl = calculateSmartTtl(recipientId, isPrioritySos = isSos),
+            ttl = 16,
             hopCount = 0,
             packetType = PacketType.TEXT_MESSAGE,
             payloadCiphertext = encrypted
         )
 
         val hasPeers = nearbyManager.connectedPeers.value.isNotEmpty()
-        val isDirectTarget = nearbyManager.connectedPeers.value.values.any {
-            (it.nodeId == recipientId || it.endpointId == recipientId) && it.isDirect
-        }
-        val initialStatus = when {
-            !hasPeers -> MessageStatus.SENDING
-            isDirectTarget || recipientId == "*" -> MessageStatus.SENT
-            else -> MessageStatus.RELAYED
-        }
-
         val msg = ChatMessage(
             id = packet.packetId,
             senderId = localNodeId,
             senderName = localNodeName,
             recipientId = recipientId,
-            text = text,
+            text = clean,
             timestamp = System.currentTimeMillis(),
             isOutgoing = true,
-            status = initialStatus,
+            status = if (hasPeers) MessageStatus.SENT else MessageStatus.SENDING,
             hopCount = 0,
             isEncrypted = true
         )
@@ -304,12 +388,312 @@ class CipherMeshRepository(
         _conversations.value = _conversations.value + (key to (list + msg))
         saveConversationsToDisk()
 
-        if (recipientId != "*" || !hasPeers) {
-            pendingOutbox[packet.packetId] = Pair(text, packet)
-            meshMuleVault[packet.packetId] = packet
-            saveOutboxToDisk()
+        pendingOutbox[packet.packetId] = Pair(clean, packet)
+        saveOutboxToDisk()
+        nearbyManager.sendMeshPacket(packet)
+    }
+
+    fun sendStegoHiddenMessage(recipientId: String, coverText: String, secretText: String) {
+        val cleanCover = coverText.trim().ifEmpty { "السلام عليكم، كيف حالك اليوم؟" }
+        val cleanSecret = secretText.trim()
+        if (cleanSecret.isEmpty()) {
+            sendTextMessage(recipientId, cleanCover)
+            return
         }
-        if (hasPeers) nearbyManager.sendMeshPacket(packet)
+
+        val innerEncryptedSecret = encryptWithUniversalKey(cleanSecret)
+        val rawWireText = listOf("__STEGO_V2__", cleanCover, innerEncryptedSecret).joinToString(sep.toString())
+        val outerEncrypted = encryptWithUniversalKey(rawWireText)
+
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = recipientId,
+            ttl = 16,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = outerEncrypted
+        )
+
+        val hasPeers = nearbyManager.connectedPeers.value.isNotEmpty()
+        val msg = ChatMessage(
+            id = packet.packetId,
+            senderId = localNodeId,
+            senderName = localNodeName,
+            recipientId = recipientId,
+            text = cleanCover,
+            timestamp = System.currentTimeMillis(),
+            isOutgoing = true,
+            status = if (hasPeers) MessageStatus.SENT else MessageStatus.SENDING,
+            hopCount = 0,
+            isEncrypted = true
+        )
+
+        _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to cleanSecret)
+        val key = if (recipientId == "*") "*" else recipientId
+        val list = _conversations.value[key] ?: emptyMsgList
+        _conversations.value = _conversations.value + (key to (list + msg))
+        saveConversationsToDisk()
+
+        pendingOutbox[packet.packetId] = Pair(rawWireText, packet)
+        saveOutboxToDisk()
+        nearbyManager.sendMeshPacket(packet)
+    }
+
+    fun toggleRevealStegoMessage(messageId: String) {
+        val cur = _revealedStegoIds.value
+        _revealedStegoIds.value = if (cur.contains(messageId)) cur - messageId else cur + messageId
+    }
+
+    fun sendSignedDigitalVoucher(recipientId: String, amountText: String, purposeText: String) {
+        val cleanAmount = amountText.trim().ifEmpty { "100" }
+        val cleanPurpose = purposeText.trim().ifEmpty { "دفعة مستحقة" }
+        val timestampStr = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        val issuerFp = CryptoManager.localFingerprint.replace(":", "").take(10).uppercase()
+
+        val voucherBody = StringBuilder()
+            .append("💸 [سند رقمي موثق]").append(nl)
+            .append("• القيمة: ").append(cleanAmount).append(nl)
+            .append("• البيان: ").append(cleanPurpose).append(nl)
+            .append("• المُصدِر: ").append(localNodeName).append(nl)
+            .append("• التاريخ: ").append(timestampStr).append(nl)
+            .append("• البصمة: SIG-").append(issuerFp)
+            .toString()
+
+        sendTextMessage(recipientId, voucherBody)
+    }
+
+    fun sendLiveTelemetryBeacon(recipientId: String) {
+        val batPct = getDeviceBatteryPercentage()
+        val distStr = estimatePeerDistanceText(recipientId)
+        val timeStr = SimpleDateFormat("HH:mm", Locale.US).format(Date())
+
+        val beaconText = StringBuilder()
+            .append("🔋 [حالة البطارية والشبكة - ").append(timeStr).append("]").append(nl)
+            .append("• شحن البطارية: ").append(batPct).append("%").append(nl)
+            .append("• حالة الاتصال: ").append(distStr)
+            .toString()
+
+        sendTextMessage(recipientId, beaconText)
+    }
+
+    fun getDeviceBatteryPercentage(): Int {
+        return try {
+            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            val lvl = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            if (lvl in 1..100) lvl else {
+                val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+                if (level in 0..Int.MAX_VALUE && scale in 1..Int.MAX_VALUE) (level * 100) / scale else 85
+            }
+        } catch (e: Exception) { 85 }
+    }
+
+    fun estimatePeerDistanceText(peerId: String?): String {
+        if (peerId == null || peerId == "*") return "البث العام • متصل"
+        val peer = nearbyManager.connectedPeers.value.values.find {
+            it.nodeId == peerId || it.endpointId == peerId
+        } ?: return "حفظ تلقائي للرسائل 📦"
+
+        if (peer.endpointId.startsWith("global-")) {
+            return "متصل عبر الإنترنت 🌍"
+        }
+
+        val rssi = peer.signalStrengthDbm
+        val proximityClass = when {
+            rssi in -58..0 -> "متصل قريب 🟢"
+            rssi in -75..-59 -> "متصل متوسط 🔵"
+            else -> "متصل بعيد 🟠"
+        }
+        return "$proximityClass (${peer.hops} قفزة)"
+    }
+
+    fun editMessage(peerKey: String, messageId: String, newText: String) {
+        val cleanText = newText.trim()
+        if (cleanText.isEmpty()) return
+        val editedDisplay = if (cleanText.endsWith("(معدلة ✏️)")) cleanText else "$cleanText (معدلة ✏️)"
+
+        _conversations.value = _conversations.value.mapValues { (k, list) ->
+            if (k == peerKey) list.map { if (it.id == messageId) it.copy(text = editedDisplay) else it } else list
+        }
+        saveConversationsToDisk()
+
+        val cmdPlain = listOf("__CMD_EDIT__", messageId, cleanText).joinToString(sep.toString())
+        val encrypted = encryptWithUniversalKey(cmdPlain)
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = peerKey,
+            ttl = 12,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = encrypted
+        )
+        nearbyManager.sendMeshPacket(packet)
+    }
+
+    fun deleteMessageForEveryone(peerKey: String, messageId: String) {
+        deleteMessageMediaFiles(peerKey, messageId)
+        _conversations.value = _conversations.value.mapValues { (k, list) ->
+            if (k == peerKey) list.filterNot { it.id == messageId } else list
+        }
+        saveConversationsToDisk()
+
+        val cmdPlain = listOf("__CMD_DELETE__", messageId).joinToString(sep.toString())
+        val encrypted = encryptWithUniversalKey(cmdPlain)
+        val packet = MeshPacket(
+            sourceNodeId = localNodeId,
+            sourceNodeName = localNodeName,
+            destinationNodeId = peerKey,
+            ttl = 12,
+            hopCount = 0,
+            packetType = PacketType.TEXT_MESSAGE,
+            payloadCiphertext = encrypted
+        )
+        nearbyManager.sendMeshPacket(packet)
+    }
+
+    private fun deleteMessageMediaFiles(peerKey: String, messageId: String) {
+        try {
+            val path = _conversations.value[peerKey]?.find { it.id == messageId }?.mediaUri
+            if (!path.isNullOrBlank()) File(path).takeIf { it.exists() }?.delete()
+        } catch (e: Exception) {}
+    }
+
+    fun translateMessageOffline(messageId: String, rawText: String): String {
+        val cleanSource = rawText.replace("(معدلة ✏️)", "").trim()
+        if (looksLikeRawBase64Cipher(cleanSource)) return ""
+
+        val lower = cleanSource.lowercase(Locale.ROOT)
+            .replace("?", "")
+            .replace("!", "")
+            .replace(".", "")
+            .replace(",", "")
+            .trim()
+
+        offlinePhraseDictionary[lower]?.let {
+            _translatedMessages.value = _translatedMessages.value + (messageId to it)
+            return it
+        }
+
+        var workingText = lower
+        for ((eng, ar) in offlinePhraseDictionary) {
+            if (workingText.contains(eng)) workingText = workingText.replace(eng, ar)
+        }
+
+        val words = workingText.split(' ').filter { it.isNotEmpty() }
+        val translatedWords = mutableListOf("init").apply { clear() }
+        var anyTranslated = false
+
+        for (w in words) {
+            val mapped = offlineWordDictionary[w]
+            if (mapped != null) {
+                anyTranslated = true
+                if (mapped.isNotEmpty()) translatedWords.add(mapped)
+            } else {
+                translatedWords.add(w)
+            }
+        }
+
+        val finalResult = if (anyTranslated || workingText != lower) {
+            translatedWords.joinToString(" ")
+        } else {
+            "النص واضح بالعربية"
+        }
+        _translatedMessages.value = _translatedMessages.value + (messageId to finalResult)
+        return finalResult
+    }
+
+    fun pinMessageInChat(peerKey: String, messageText: String?) {
+        _pinnedMessages.value = if (messageText.isNullOrBlank()) _pinnedMessages.value - peerKey else _pinnedMessages.value + (peerKey to messageText)
+    }
+
+    private fun purgeExpiredMessagesAndMedia() {
+        val now = System.currentTimeMillis()
+        var changed = false
+        val updated = _conversations.value.mapValues { (peerKey, list) ->
+            val filtered = list.filter { msg ->
+                val keep = (msg.id == "sys-welcome") || ((now - msg.timestamp) in 0L until 60000L)
+                if (!keep) {
+                    changed = true
+                    msg.mediaUri?.let { try { File(it).delete() } catch (e: Exception) {} }
+                }
+                keep
+            }
+            if (peerKey == "*" && filtered.isEmpty()) listOf(welcomeMessage) else filtered
+        }
+        if (changed) {
+            _conversations.value = updated
+            saveConversationsToDisk()
+            try { (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancelAll() } catch (e: Exception) {}
+        }
+    }
+
+    fun toggleSelfDestructMode() {
+        val next = !_isSelfDestructEnabled.value
+        _isSelfDestructEnabled.value = next
+        prefs.edit().putBoolean("self_destruct_enabled", next).apply()
+    }
+
+    fun configureAutoReply(enabled: Boolean, messageText: String) {
+        val cleanText = messageText.trim().ifEmpty { "أنا بعيد عن الهاتف حالياً، وصلتني رسالتك وسأرد عليك قريباً." }
+        _isAutoReplyEnabled.value = enabled
+        _autoReplyText.value = cleanText
+        prefs.edit().putBoolean("auto_reply_enabled", enabled).putString("auto_reply_text", cleanText).apply()
+    }
+
+    fun updatePinCode(newPin: String) {
+        val cleanPin = newPin.trim()
+        _appPinCode.value = cleanPin
+        prefs.edit().putString("app_pin_code", cleanPin).apply()
+        if (cleanPin.isEmpty()) _isAppLocked.value = false
+    }
+
+    fun lockAppNow() {
+        if (_appPinCode.value.isNotEmpty()) _isAppLocked.value = true
+    }
+
+    fun verifyPinOrDuress(enteredPin: String): Boolean {
+        val clean = enteredPin.trim()
+        val currentPin = _appPinCode.value
+        val reversedPin = if (currentPin.length in 3..Int.MAX_VALUE) currentPin.reversed() else ""
+
+        if (clean == "9911" || (reversedPin.isNotEmpty() && reversedPin != currentPin && clean == reversedPin)) {
+            clearAllConversations()
+            _isAppLocked.value = false
+            return true
+        }
+        if (clean == currentPin || currentPin.isEmpty()) {
+            _isAppLocked.value = false
+            return true
+        }
+        return false
+    }
+
+    fun updateNodeName(newName: String) {
+        val cleanName = newName.trim()
+        if (cleanName.isEmpty()) return
+        localNodeName = cleanName
+        _localNodeNameFlow.value = cleanName
+        prefs.edit().putString("local_node_name", cleanName).apply()
+        nearbyManager.initialize(localNodeId, cleanName)
+        if (nearbyManager.isAdvertising.value || nearbyManager.isDiscovering.value) {
+            nearbyManager.stopMesh()
+            nearbyManager.startMesh()
+        }
+    }
+
+    fun sendSosAlert() {
+        val now = System.currentTimeMillis()
+        val lastSos = sosRateLimitMap[localNodeId] ?: 0L
+        if ((now - lastSos) in 0L until 8000L) return
+        sosRateLimitMap[localNodeId] = now
+
+        val bat = getDeviceBatteryPercentage()
+        val timeStr = SimpleDateFormat("HH:mm", Locale.US).format(Date(now))
+        val sosMessage = "🚨 [نداء طوارئ عاجل] من $localNodeName (البطارية: $bat% • الوقت: $timeStr): أحتاج إلى تواصل ومساعدة فورية!"
+        sendTextMessage("*", sosMessage)
     }
 
     fun startVoiceNoteRecording() {
@@ -464,346 +848,6 @@ class CipherMeshRepository(
         }
     }
 
-    private fun computeSha256Hex(input: String): String {
-        return try {
-            val digest = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-            val sb = StringBuilder()
-            for (b in digest.take(8)) sb.append(String.format("%02X", b))
-            sb.toString()
-        } catch (e: Exception) {
-            UUID.randomUUID().toString().replace("-", "").take(16).uppercase()
-        }
-    }
-
-    private fun calculateSmartTtl(recipientId: String, isPrioritySos: Boolean = false): Int {
-        if (isPrioritySos) return 32
-        if (recipientId == "*") return 14
-        val peer = nearbyManager.connectedPeers.value.values.find { it.nodeId == recipientId || it.endpointId == recipientId }
-        return when {
-            peer == null -> 24
-            peer.isDirect -> 4
-            else -> (peer.hops + 6).coerceIn(6, 32)
-        }
-    }
-
-    fun sendStegoHiddenMessage(recipientId: String, coverText: String, secretText: String) {
-        val cleanCover = coverText.trim().ifEmpty { "السلام عليكم، كيف الأمور اليوم؟" }
-        val cleanSecret = secretText.trim()
-        if (cleanSecret.isEmpty()) {
-            sendTextMessage(recipientId, cleanCover)
-            return
-        }
-
-        val sessionKey = nearbyManager.getSessionKey(recipientId)
-        val innerEncryptedSecret = CryptoManager.encryptText(cleanSecret, sessionKey)
-        val rawWireText = listOf("__STEGO_V2__", cleanCover, innerEncryptedSecret).joinToString(sep.toString())
-        val outerEncrypted = CryptoManager.encryptText(rawWireText, sessionKey)
-
-        val packet = MeshPacket(
-            sourceNodeId = localNodeId,
-            sourceNodeName = localNodeName,
-            destinationNodeId = recipientId,
-            ttl = calculateSmartTtl(recipientId),
-            hopCount = 0,
-            packetType = PacketType.TEXT_MESSAGE,
-            payloadCiphertext = outerEncrypted
-        )
-
-        val hasPeers = nearbyManager.connectedPeers.value.isNotEmpty()
-        val msg = ChatMessage(
-            id = packet.packetId,
-            senderId = localNodeId,
-            senderName = localNodeName,
-            recipientId = recipientId,
-            text = cleanCover,
-            timestamp = System.currentTimeMillis(),
-            isOutgoing = true,
-            status = if (hasPeers) MessageStatus.SENT else MessageStatus.SENDING,
-            hopCount = 0,
-            isEncrypted = true
-        )
-
-        _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to cleanSecret)
-        val key = if (recipientId == "*") "*" else recipientId
-        val list = _conversations.value[key] ?: emptyMsgList
-        _conversations.value = _conversations.value + (key to (list + msg))
-        saveConversationsToDisk()
-
-        if (recipientId != "*" || !hasPeers) {
-            pendingOutbox[packet.packetId] = Pair(rawWireText, packet)
-            meshMuleVault[packet.packetId] = packet
-            saveOutboxToDisk()
-        }
-        if (hasPeers) nearbyManager.sendMeshPacket(packet)
-    }
-
-    fun toggleRevealStegoMessage(messageId: String) {
-        val cur = _revealedStegoIds.value
-        _revealedStegoIds.value = if (cur.contains(messageId)) cur - messageId else cur + messageId
-    }
-
-    fun sendSignedDigitalVoucher(recipientId: String, amountText: String, purposeText: String) {
-        val cleanAmount = amountText.trim().ifEmpty { "100" }
-        val cleanPurpose = purposeText.trim().ifEmpty { "دفعة مستحقة" }
-        val timestampStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-        val issuerFp = CryptoManager.localFingerprint.replace(":", "").take(12).uppercase()
-        val contentHash = computeSha256Hex("$cleanAmount-$cleanPurpose-$localNodeId-$timestampStr")
-
-        val voucherBody = StringBuilder()
-            .append("💸 [سند رقمي موثق SHA-256 #").append(contentHash.take(8)).append("]").append(nl)
-            .append("• القيمة: ").append(cleanAmount).append(nl)
-            .append("• البيان: ").append(cleanPurpose).append(nl)
-            .append("• المُصدِر: ").append(localNodeName).append(nl)
-            .append("• الوقت: ").append(timestampStr).append(nl)
-            .append("• بصمة SHA-256: ").append(contentHash).append(nl)
-            .append("• التوقيع: SIG-").append(issuerFp)
-            .toString()
-
-        sendTextMessage(recipientId, voucherBody)
-    }
-
-    fun sendLiveTelemetryBeacon(recipientId: String) {
-        val batPct = getDeviceBatteryPercentage()
-        val distStr = estimatePeerDistanceText(recipientId)
-        val ipStr = nearbyManager.getPrimaryLocalIp()
-        val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-
-        val beaconText = StringBuilder()
-            .append("📡 [تقرير تشخيص الشبكة والبطارية - ").append(timeStr).append("]").append(nl)
-            .append("• مستوى البطارية: ").append(batPct).append("% 🔋").append(nl)
-            .append("• الإشارة والقرب: ").append(distStr).append(nl)
-            .append("• المسار النشط: ").append(ipStr)
-            .toString()
-
-        sendTextMessage(recipientId, beaconText)
-    }
-
-    fun getDeviceBatteryPercentage(): Int {
-        return try {
-            val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-            val lvl = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
-            if (lvl in 1..100) lvl else {
-                val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-                val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-                if (level in 0..Int.MAX_VALUE && scale in 1..Int.MAX_VALUE) (level * 100) / scale else 85
-            }
-        } catch (e: Exception) { 85 }
-    }
-
-    fun estimatePeerDistanceText(peerId: String?): String {
-        if (peerId == null || peerId == "*") return "بث شبكي متعدد المسارات (Mesh)"
-        val peer = nearbyManager.connectedPeers.value.values.find {
-            it.nodeId == peerId || it.endpointId == peerId
-        } ?: return "خارج التغطية المباشرة (تخزين وترحيل تلقائي 📦)"
-
-        if (peer.endpointId.startsWith("global-")) {
-            return "ربط عبر الجسر الدولي 🌍 (${peer.hops} قفزات)"
-        }
-
-        val rssi = peer.signalStrengthDbm
-        val ratio = (-41.0 - rssi.toDouble()) / (10.0 * 2.4)
-        val rawMeters = 10.0.pow(ratio).coerceIn(1.0, 200.0).roundToInt()
-        val margin = maxOf(2, (rawMeters * 0.35).roundToInt())
-
-        val proximityClass = when {
-            rssi in -55..0 -> "قريب 🟢"
-            rssi in -72..-56 -> "متوسط 🔵"
-            else -> "بعيد 🟠"
-        }
-
-        return if (peer.isDirect) {
-            "$proximityClass ($rssi dBm • ~${rawMeters}m ±${margin}m)"
-        } else {
-            "عبر ${peer.hops} قفزات ($rssi dBm)"
-        }
-    }
-
-    private fun flushMeshMuleVault() {
-        val snapshot = synchronized(meshMuleVault) { meshMuleVault.toMap() }
-        for ((pktId, pkt) in snapshot) {
-            nearbyManager.sendMeshPacket(pkt)
-            meshMuleVault.remove(pktId)
-        }
-    }
-
-    fun editMessage(peerKey: String, messageId: String, newText: String) {
-        val cleanText = newText.trim()
-        if (cleanText.isEmpty()) return
-        val editedDisplay = if (cleanText.endsWith("(معدلة ✏️)")) cleanText else "$cleanText (معدلة ✏️)"
-
-        _conversations.value = _conversations.value.mapValues { (k, list) ->
-            if (k == peerKey) list.map { if (it.id == messageId) it.copy(text = editedDisplay) else it } else list
-        }
-        saveConversationsToDisk()
-
-        val cmdPlain = listOf("__CMD_EDIT__", messageId, cleanText).joinToString(sep.toString())
-        val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
-        val packet = MeshPacket(
-            sourceNodeId = localNodeId,
-            sourceNodeName = localNodeName,
-            destinationNodeId = peerKey,
-            ttl = calculateSmartTtl(peerKey),
-            hopCount = 0,
-            packetType = PacketType.TEXT_MESSAGE,
-            payloadCiphertext = encrypted
-        )
-        if (nearbyManager.connectedPeers.value.isNotEmpty()) nearbyManager.sendMeshPacket(packet)
-    }
-
-    fun deleteMessageForEveryone(peerKey: String, messageId: String) {
-        deleteMessageMediaFiles(peerKey, messageId)
-        _conversations.value = _conversations.value.mapValues { (k, list) ->
-            if (k == peerKey) list.filterNot { it.id == messageId } else list
-        }
-        saveConversationsToDisk()
-
-        val cmdPlain = listOf("__CMD_DELETE__", messageId).joinToString(sep.toString())
-        val encrypted = CryptoManager.encryptText(cmdPlain, nearbyManager.getSessionKey(peerKey))
-        val packet = MeshPacket(
-            sourceNodeId = localNodeId,
-            sourceNodeName = localNodeName,
-            destinationNodeId = peerKey,
-            ttl = calculateSmartTtl(peerKey),
-            hopCount = 0,
-            packetType = PacketType.TEXT_MESSAGE,
-            payloadCiphertext = encrypted
-        )
-        if (nearbyManager.connectedPeers.value.isNotEmpty()) nearbyManager.sendMeshPacket(packet)
-    }
-
-    private fun deleteMessageMediaFiles(peerKey: String, messageId: String) {
-        try {
-            val path = _conversations.value[peerKey]?.find { it.id == messageId }?.mediaUri
-            if (!path.isNullOrBlank()) File(path).takeIf { it.exists() }?.delete()
-        } catch (e: Exception) {}
-    }
-
-    fun translateMessageOffline(messageId: String, rawText: String): String {
-        val cleanSource = rawText.replace("(معدلة ✏️)", "").trim()
-        val lower = cleanSource.lowercase(Locale.ROOT).replace("?", "").replace("!", "").replace(".", "").replace(",", "").trim()
-
-        offlinePhraseDictionary[lower]?.let {
-            _translatedMessages.value = _translatedMessages.value + (messageId to it)
-            return it
-        }
-
-        var workingText = lower
-        for ((eng, ar) in offlinePhraseDictionary) {
-            if (workingText.contains(eng)) workingText = workingText.replace(eng, ar)
-        }
-
-        val words = workingText.split(' ').filter { it.isNotEmpty() }
-        val translatedWords = mutableListOf("init").apply { clear() }
-        var anyTranslated = false
-
-        for (w in words) {
-            val mapped = offlineWordDictionary[w]
-            if (mapped != null) {
-                anyTranslated = true
-                if (mapped.isNotEmpty()) translatedWords.add(mapped)
-            } else {
-                translatedWords.add(w)
-            }
-        }
-
-        val finalResult = if (anyTranslated || workingText != lower) translatedWords.joinToString(" ") else "الترجمة المحلية: $cleanSource"
-        _translatedMessages.value = _translatedMessages.value + (messageId to finalResult)
-        return finalResult
-    }
-
-    fun pinMessageInChat(peerKey: String, messageText: String?) {
-        _pinnedMessages.value = if (messageText.isNullOrBlank()) _pinnedMessages.value - peerKey else _pinnedMessages.value + (peerKey to messageText)
-    }
-
-    private fun purgeExpiredMessagesAndMedia() {
-        val now = System.currentTimeMillis()
-        var changed = false
-        val updated = _conversations.value.mapValues { (peerKey, list) ->
-            val filtered = list.filter { msg ->
-                val keep = (msg.id == "sys-welcome") || ((now - msg.timestamp) in 0L until 60000L)
-                if (!keep) {
-                    changed = true
-                    msg.mediaUri?.let { try { File(it).delete() } catch (e: Exception) {} }
-                }
-                keep
-            }
-            if (peerKey == "*" && filtered.isEmpty()) listOf(welcomeMessage) else filtered
-        }
-        if (changed) {
-            _conversations.value = updated
-            saveConversationsToDisk()
-            try { (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancelAll() } catch (e: Exception) {}
-        }
-    }
-
-    fun toggleSelfDestructMode() {
-        val next = !_isSelfDestructEnabled.value
-        _isSelfDestructEnabled.value = next
-        prefs.edit().putBoolean("self_destruct_enabled", next).apply()
-    }
-
-    fun configureAutoReply(enabled: Boolean, messageText: String) {
-        val cleanText = messageText.trim().ifEmpty { "أنا بعيد عن الهاتف حالياً، وصلتني رسالتك المشفرة عبر الشبكة وسأرد عليك قريباً." }
-        _isAutoReplyEnabled.value = enabled
-        _autoReplyText.value = cleanText
-        prefs.edit().putBoolean("auto_reply_enabled", enabled).putString("auto_reply_text", cleanText).apply()
-    }
-
-    fun updatePinCode(newPin: String) {
-        val cleanPin = newPin.trim()
-        _appPinCode.value = cleanPin
-        prefs.edit().putString("app_pin_code", cleanPin).apply()
-        if (cleanPin.isEmpty()) _isAppLocked.value = false
-    }
-
-    fun lockAppNow() {
-        if (_appPinCode.value.isNotEmpty()) _isAppLocked.value = true
-    }
-
-    fun verifyPinOrDuress(enteredPin: String): Boolean {
-        val clean = enteredPin.trim()
-        val currentPin = _appPinCode.value
-        val reversedPin = if (currentPin.length in 3..Int.MAX_VALUE) currentPin.reversed() else ""
-
-        if (clean == "9911" || (reversedPin.isNotEmpty() && reversedPin != currentPin && clean == reversedPin)) {
-            clearAllConversations()
-            _isAppLocked.value = false
-            return true
-        }
-        if (clean == currentPin || currentPin.isEmpty()) {
-            _isAppLocked.value = false
-            return true
-        }
-        return false
-    }
-
-    fun updateNodeName(newName: String) {
-        val cleanName = newName.trim()
-        if (cleanName.isEmpty()) return
-        localNodeName = cleanName
-        _localNodeNameFlow.value = cleanName
-        prefs.edit().putString("local_node_name", cleanName).apply()
-        nearbyManager.initialize(localNodeId, cleanName)
-        if (nearbyManager.isAdvertising.value || nearbyManager.isDiscovering.value) {
-            nearbyManager.stopMesh()
-            nearbyManager.startMesh()
-        }
-    }
-
-    fun sendSosAlert() {
-        val now = System.currentTimeMillis()
-        val lastSos = sosRateLimitMap[localNodeId] ?: 0L
-        if ((now - lastSos) in 0L until 8000L) return
-        sosRateLimitMap[localNodeId] = now
-
-        val bat = getDeviceBatteryPercentage()
-        val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(now))
-        val idFp = CryptoManager.localFingerprint.replace(":", "").take(8).uppercase()
-        val sosMessage = "🚨 [نداء طوارئ SOS عاجل] من $localNodeName (هوية: $idFp • البطارية: $bat% • الوقت: $timeStr): أحتاج إلى مساعدة وتواصل فوري!"
-        sendTextMessage("*", sosMessage)
-    }
-
     private fun saveConversationsToDisk() {
         scope.launch {
             synchronized(dbLock) {
@@ -811,10 +855,10 @@ class CipherMeshRepository(
                     val root = JSONObject()
                     val currentMap = _conversations.value
                     val currentStego = _stegoSecrets.value
-                    val masterKey = nearbyManager.getSessionKey(localNodeId)
                     for ((peerKey, msgList) in currentMap) {
                         val arr = JSONArray()
                         for (msg in msgList) {
+                            if (looksLikeRawBase64Cipher(msg.text)) continue
                             val obj = JSONObject()
                             obj.put("id", msg.id)
                             obj.put("senderId", msg.senderId)
@@ -822,7 +866,7 @@ class CipherMeshRepository(
                             obj.put("recipientId", msg.recipientId)
                             obj.put("text", msg.text)
                             val plainStego = currentStego[msg.id] ?: ""
-                            val encStego = if (plainStego.isNotEmpty()) CryptoManager.encryptText(plainStego, masterKey) else ""
+                            val encStego = if (plainStego.isNotEmpty()) encryptWithUniversalKey(plainStego) else ""
                             obj.put("stegoSecretEnc", encStego)
                             obj.put("mediaType", msg.mediaType?.name ?: "")
                             obj.put("mediaUri", msg.mediaUri ?: "")
@@ -859,7 +903,6 @@ class CipherMeshRepository(
                 var loadedStego = mapOf("init" to "").minus("init")
                 val keys = root.keys()
                 val defaultMediaType = welcomeMessage.mediaType
-                val masterKey = nearbyManager.getSessionKey(localNodeId)
 
                 while (keys.hasNext()) {
                     val peerKey = keys.next()
@@ -868,11 +911,14 @@ class CipherMeshRepository(
 
                     for (i in 0 until arr.length()) {
                         val obj = arr.optJSONObject(i) ?: continue
+                        val rawTxt = obj.optString("text", "")
+                        if (looksLikeRawBase64Cipher(rawTxt)) continue
+
                         val msgId = obj.optString("id", UUID.randomUUID().toString())
                         val encStego = obj.optString("stegoSecretEnc", "")
                         if (encStego.isNotEmpty()) {
-                            val decStego = try { CryptoManager.decryptText(encStego, masterKey) } catch (e: Exception) { encStego }
-                            loadedStego = loadedStego + (msgId to decStego)
+                            val decStego = decryptSmart(encStego, localNodeId)
+                            if (decStego.isNotEmpty()) loadedStego = loadedStego + (msgId to decStego)
                         }
 
                         val mediaTypeStr = obj.optString("mediaType", "")
@@ -894,7 +940,7 @@ class CipherMeshRepository(
                             senderId = obj.optString("senderId", ""),
                             senderName = obj.optString("senderName", ""),
                             recipientId = obj.optString("recipientId", peerKey),
-                            text = obj.optString("text", ""),
+                            text = rawTxt,
                             mediaType = mediaType,
                             mediaUri = obj.optString("mediaUri", "").ifEmpty { null },
                             fileName = obj.optString("fileName", "").ifEmpty { null },
@@ -969,25 +1015,20 @@ class CipherMeshRepository(
         for ((msgId, pair) in snapshot) {
             val plainText = pair.first
             val originalPacket = pair.second
-            val recipientId = originalPacket.destinationNodeId
-
-            val reEncrypted = if (plainText.isNotEmpty()) {
-                CryptoManager.encryptText(plainText, nearbyManager.getSessionKey(recipientId))
-            } else originalPacket.payloadCiphertext
+            val reEncrypted = if (plainText.isNotEmpty()) encryptWithUniversalKey(plainText) else originalPacket.payloadCiphertext
 
             val updatedPacket = originalPacket.copy(
                 sourceNodeName = localNodeName,
-                ttl = calculateSmartTtl(recipientId),
+                ttl = 16,
                 payloadCiphertext = reEncrypted
             )
             nearbyManager.sendMeshPacket(updatedPacket)
-            if (recipientId == "*") pendingOutbox.remove(msgId)
 
             _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                 msgs.map {
                     if (it.id == msgId && it.status == MessageStatus.SENDING) {
                         statusUpdated = true
-                        it.copy(status = MessageStatus.RELAYED)
+                        it.copy(status = MessageStatus.SENT)
                     } else it
                 }
             }
@@ -1004,7 +1045,7 @@ class CipherMeshRepository(
                     sourceNodeId = localNodeId,
                     sourceNodeName = localNodeName,
                     destinationNodeId = peerId,
-                    ttl = calculateSmartTtl(peerId),
+                    ttl = 12,
                     hopCount = 0,
                     packetType = PacketType.READ_RECEIPT,
                     payloadCiphertext = msg.id
@@ -1017,8 +1058,8 @@ class CipherMeshRepository(
     private fun handleIncomingPacket(packet: MeshPacket) {
         when (packet.packetType) {
             PacketType.TEXT_MESSAGE -> {
-                val key = nearbyManager.getSessionKey(packet.sourceNodeId)
-                val rawDecrypted = try { CryptoManager.decryptText(packet.payloadCiphertext, key) } catch (e: Exception) { packet.payloadCiphertext }
+                val rawDecrypted = decryptSmart(packet.payloadCiphertext, packet.sourceNodeId)
+                if (rawDecrypted.isBlank()) return
 
                 val convKey = if (packet.isBroadcast) "*" else packet.sourceNodeId
                 val editPrefix = "__CMD_EDIT__" + sep
@@ -1057,8 +1098,10 @@ class CipherMeshRepository(
                     val parts = rawDecrypted.split(sep, limit = 3)
                     if (parts.size == 3) {
                         visibleText = parts[1]
-                        val innerDec = try { CryptoManager.decryptText(parts[2], key) } catch (e: Exception) { parts[2] }
-                        _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to innerDec)
+                        val innerDec = decryptSmart(parts[2], packet.sourceNodeId)
+                        if (innerDec.isNotEmpty()) {
+                            _stegoSecrets.value = _stegoSecrets.value + (packet.packetId to innerDec)
+                        }
                     }
                 } else if (rawDecrypted.startsWith(stegoV1Prefix)) {
                     val parts = rawDecrypted.split(sep, limit = 3)
@@ -1104,7 +1147,7 @@ class CipherMeshRepository(
                         sourceNodeId = localNodeId,
                         sourceNodeName = localNodeName,
                         destinationNodeId = packet.sourceNodeId,
-                        ttl = calculateSmartTtl(packet.sourceNodeId),
+                        ttl = 12,
                         hopCount = 0,
                         packetType = PacketType.READ_RECEIPT,
                         payloadCiphertext = packet.packetId
@@ -1115,7 +1158,6 @@ class CipherMeshRepository(
             PacketType.DELIVERY_ACK -> {
                 val ackId = packet.payloadCiphertext
                 pendingOutbox.remove(ackId)
-                meshMuleVault.remove(ackId)
                 saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map { if (it.id == ackId && it.status != MessageStatus.READ) it.copy(status = MessageStatus.DELIVERED) else it }
@@ -1125,7 +1167,6 @@ class CipherMeshRepository(
             PacketType.READ_RECEIPT -> {
                 val readId = packet.payloadCiphertext
                 pendingOutbox.remove(readId)
-                meshMuleVault.remove(readId)
                 saveOutboxToDisk()
                 _conversations.value = _conversations.value.mapValues { (_, msgs) ->
                     msgs.map { if (it.id == readId) it.copy(status = MessageStatus.READ) else it }
